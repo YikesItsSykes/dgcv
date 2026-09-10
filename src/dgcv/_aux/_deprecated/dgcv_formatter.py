@@ -270,7 +270,6 @@ def build_object_string(
 
 
 def convert_to_greek(var_name):
-    # Replace variable names with their corresponding Greek letters
     for name, greek in greek_letters.items():
         if var_name == name:
             return greek

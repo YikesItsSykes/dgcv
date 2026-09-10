@@ -632,6 +632,8 @@ class case_tree:
         if plain_text is True:
             print({"closed": self.closed_case_rules, "open": self.open_case_rules})
         else:
+            from .._aux.printing.printing._dgcv_display import show
+
             show(self._repr_latex_(**kwargs))
 
     @property

@@ -1593,6 +1593,8 @@ def _snapshot_algebras_(style=None, use_latex=None, slim=False, **kwargs):
     def _format_grading(label):
         try:
             alg = global_dict[label]
+            if alg._gradingNumber * alg.dimension > 30:
+                return f"{alg._gradingNumber} gradings assigned"
             grading = getattr(alg, "grading", None)
             if isinstance(grading, (list, tuple)):
                 if all(isinstance(g, (list, tuple)) for g in grading):

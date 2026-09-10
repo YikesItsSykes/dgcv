@@ -482,7 +482,6 @@ class vector_field_class(tensor_field_class):
 
         half = rational(1, 2)
         imu = imag_unit()
-        mIhalf = -imu * half
 
         has_conj = not verify_conjugate_re_im_free(other)
         a = allToSym(other) if has_conj else other
@@ -522,9 +521,9 @@ class vector_field_class(tensor_field_class):
                 elif st == "anti":
                     out += c * diff_local(a, zb)
                 elif st == "real":
-                    out += c * half * (diff_local(a, z) + diff_local(a, zb))
+                    out += c * (diff_local(a, z) + diff_local(a, zb))
                 elif st == "imag":
-                    out += c * mIhalf * (diff_local(a, z) - diff_local(a, zb))
+                    out += c * imu * (diff_local(a, z) - diff_local(a, zb))
                 else:
                     out += c * diff_local(a, v)
                 continue

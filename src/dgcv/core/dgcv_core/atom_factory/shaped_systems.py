@@ -12,7 +12,6 @@ def createMatrixCoordinates(
     variable_label: str,
     real_label: str | int | None = None,
     imaginary_label: str | None = None,
-    number_of_variables: int | None = None,
     initialIndex: int | None = 1,
     withVF: bool | None = None,
     complex: bool | None = None,

@@ -5,7 +5,7 @@ from typing import Any, Dict, Sequence
 from ..._aux._backends._symbolic_router import get_free_symbols
 from ..._aux._backends._types_and_constants import expr_numeric_types, is_atomic
 from ..._aux._vmf._safeguards import get_dgcv_category, query_dgcv_categories
-from ..._aux._vmf.vmf import vmf_lookup
+from ..._aux._vmf.vmf import order_coordinates, vmf_lookup
 from ..dgcv_core import VF_bracket, differential_form_class
 from .retrieval import coordinate_differential_form, coordinate_vector_field
 
@@ -44,10 +44,13 @@ def makeZeroForm(
     )
 
 
-def _prep_symb_set_for_ext_der(symbols, use_for_zero_form=False, full_dict=False):
+def _prep_symb_set_for_ext_der(
+    symbols, use_for_zero_form=False, full_dict=False, prefer=None
+):
     registry: Dict[Any, Any] = {}
+    seen = set()
 
-    for atom in symbols:
+    for atom in order_coordinates(symbols):
         atom_data = vmf_lookup(
             atom,
             path=True,
@@ -82,17 +85,22 @@ def _prep_symb_set_for_ext_der(symbols, use_for_zero_form=False, full_dict=False
 
         sysreg = registry.setdefault(syslbl, {})
 
-        if atom in sysreg:
-            continue
-
-        st = atom_data.get("sub_type")
+        subtype = atom_data.get("sub_type")
         rel = atom_data.get("relatives") or {}
 
-        if st in {"holo", "anti"}:
-            sysreg[atom] = (rel.get("holo"), rel.get("anti"))
-        elif st in {"real", "imag"}:
-            sysreg[atom] = (rel.get("holo"), rel.get("anti"))
-        else:
+        if subtype in {"holo", "anti", "real", "imag"}:
+            pair = (rel.get("holo"), rel.get("anti"))
+            if pair in seen:
+                continue
+            seen.add(pair)
+            if prefer == "real" or (prefer is None and subtype in {"real", "imag"}):
+                directions = (rel.get("real"), rel.get("imag"))
+            else:
+                directions = pair
+            for direction in directions:
+                if direction is not None:
+                    sysreg[direction] = pair
+        elif atom not in sysreg:
             ds = atom_data.get("differential_system")
             if ds is not None:
                 sysreg[atom] = (atom,)
@@ -126,7 +134,10 @@ def exteriorDerivative(form_or_scalar: Any, **kwargs) -> "differential_form_clas
     else:
         exprVars = set()
 
-    relevant_vars = _prep_symb_set_for_ext_der(exprVars)
+    fmt = getattr(form, "_validated_format", None)
+    prefer = fmt if fmt in {"real", "complex"} else None
+
+    relevant_vars = _prep_symb_set_for_ext_der(exprVars, prefer=prefer)
     accumulation = 0
     for key, system in relevant_vars.items():
         if key is None:
@@ -136,6 +147,7 @@ def exteriorDerivative(form_or_scalar: Any, **kwargs) -> "differential_form_clas
                     coordinate_differential_form(atom),
                 )
                 accumulation += df * (form.apply(vf))
+            continue
         for atom in system:
             ds = vmf_lookup(atom, differential_system=True).get("differential_system")
             if ds is None:

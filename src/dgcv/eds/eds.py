@@ -26,7 +26,7 @@ import random
 import string
 from collections import Counter
 from functools import total_ordering
-from math import prod  # requires python >=3.8
+from math import prod
 
 from .._aux._backends._cls_coercion import register_legacy_sympy_class
 from .._aux._backends._display import latex as _routed_latex
@@ -50,17 +50,22 @@ from .._aux._backends._symbolic_router import (
     simplify as _routed_simplify,
 )
 from .._aux._backends._types_and_constants import (
-    HEAD_ADD,
-    HEAD_CONJUGATE,
-    HEAD_CONSTANT,
-    HEAD_EXP,
-    HEAD_NUMBER,
+    OP_ADD,
+    OP_CONJUGATE,
+    OP_CONSTANT,
+    OP_EXP,
+    OP_FUNCTION,
+    OP_MUL,
+    OP_NUMBER,
+    OP_POW,
+    OP_SYMBOL,
     as_engine_scalar,
     e_constant,
-    expr_head,
     expr_numeric_types,
+    expr_operands,
     expr_types,
     integer,
+    op_expr,
     symbol,
     zero,
 )
@@ -596,7 +601,7 @@ class zeroFormAtom(dgcv_class):
         return self
 
     def __repr__(self):
-        return f"zeroFormAtom({self.label!r})"
+        return f"zeroFormAtom({self.__str__()!r})"
 
     def __str__(self):
         """
@@ -1869,6 +1874,13 @@ class abstract_ZF(dgcv_class):
         return zf
 
 
+def _zf_coeff_str(coeff, rendered):
+    base = getattr(coeff, "base", None)
+    if not (isinstance(base, tuple) and len(base) > 0 and base[0] == "add"):
+        return rendered
+    return f"({rendered})"
+
+
 class abstDFAtom(dgcv_class):
     _dgcv_class_check = retrieve_passkey()
     _dgcv_category = "abstDFAtom"
@@ -1896,6 +1908,10 @@ class abstDFAtom(dgcv_class):
         self, coeff, degree, label=None, ext_deriv_order=0, _markers=frozenset()
     ):
         self.coeffs = [coeff]
+
+    @property
+    def is_zero(self):
+        return self._coeff == 0
 
     def _sage_(self):
         raise AttributeError
@@ -1953,7 +1969,11 @@ class abstDFAtom(dgcv_class):
         """String representation for abstDFAtom."""
 
         if isinstance(self.coeff, (zeroFormAtom, abstract_ZF)):
-            return ext_der_repr(self.coeff.__repr__(), self.ext_deriv_order)
+            coeff_str = _zf_coeff_str(self.coeff, self.coeff.__repr__())
+            return ext_der_repr(
+                f"{coeff_str}{self.label}" if self.label else coeff_str,
+                self.ext_deriv_order,
+            )
         coeff_sympy = as_engine_scalar(self.coeff)
         if (
             not get_free_symbols(coeff_sympy)
@@ -1969,7 +1989,7 @@ class abstDFAtom(dgcv_class):
             # Wrap in parentheses if there are multiple terms
             coeff_str = (
                 f"({coeff_sympy})"
-                if expr_head(coeff_sympy) == HEAD_ADD
+                if op_expr(coeff_sympy) == OP_ADD
                 else str(coeff_sympy)
             )
             return (
@@ -1982,7 +2002,13 @@ class abstDFAtom(dgcv_class):
         """LaTeX representation for abstDFAtom."""
 
         if isinstance(self.coeff, (zeroFormAtom, abstract_ZF)):
-            return ext_der_latex(_routed_latex(self.coeff), self.ext_deriv_order)
+            coeff_latex = _routed_latex(self.coeff)
+            return ext_der_latex(
+                f"{coeff_latex}{bar_label_latex(self.label)}"
+                if self.label
+                else coeff_latex,
+                self.ext_deriv_order,
+            )
         coeff_sympy = as_engine_scalar(self.coeff)
         if (
             not get_free_symbols(coeff_sympy)
@@ -1998,7 +2024,7 @@ class abstDFAtom(dgcv_class):
             # Wrap in parentheses if there are multiple terms
             coeff_latex = (
                 f"\\left({_routed_latex(coeff_sympy)}\\right)"
-                if expr_head(coeff_sympy) == HEAD_ADD
+                if op_expr(coeff_sympy) == OP_ADD
                 else _routed_latex(coeff_sympy)
             )
             return (
@@ -2014,7 +2040,11 @@ class abstDFAtom(dgcv_class):
 
     def __str__(self):
         if isinstance(self.coeff, (zeroFormAtom, abstract_ZF)):
-            return ext_der_str(self.coeff.__repr__(), self.ext_deriv_order)
+            coeff_str = _zf_coeff_str(self.coeff, self.coeff.__repr__())
+            return ext_der_str(
+                f"{coeff_str}{self.label}" if self.label else coeff_str,
+                self.ext_deriv_order,
+            )
         coeff_sympy = as_engine_scalar(self.coeff)
         if (
             not get_free_symbols(coeff_sympy)
@@ -2030,7 +2060,7 @@ class abstDFAtom(dgcv_class):
             # Wrap in parentheses if there are multiple terms
             coeff_str = (
                 f"({coeff_sympy})"
-                if expr_head(coeff_sympy) == HEAD_ADD
+                if op_expr(coeff_sympy) == OP_ADD
                 else str(coeff_sympy)
             )
             return (
@@ -3023,6 +3053,10 @@ class abstract_DF(dgcv_class):
                 coeff_list += [term.factors_sorted[0]]
         return coeff_list
 
+    @property
+    def is_zero(self):
+        return all(term.is_zero for term in self.terms)
+
     def __eq__(self, other):
         """
         Check equality of two abstract_DF instances.
@@ -3831,6 +3865,21 @@ def _extDer_abstDFAtom(df: abstDFAtom, coframe: abst_coframe):
     dfAtom, coeff = df._seperated_form
     if dfAtom in str_eqns:
         dfData = str_eqns[dfAtom]
+        if isinstance(coeff, (zeroFormAtom, abstract_ZF)):
+            new_markers = frozenset(
+                [
+                    j
+                    for j in df._markers
+                    if (j != "holomorphic" and j != "antiholomorphic")
+                ]
+            )
+            return (
+                extDer(coeff, coframe=coframe)
+                * abstDFAtom(
+                    1, df.degree, df.label, df.ext_deriv_order, _markers=new_markers
+                )
+                + coeff * dfData[1] * dfData[0]
+            )
         if coeff == 1 and dfData[1] == 1:
             return dfData[0]
         return coeff * dfData[1] * dfData[0]
@@ -4112,9 +4161,9 @@ def simplify_with_PDEs(expr, PDEs: dict, tryLess=False, iterations=1):
 def _sympify_abst_ZF(zf: abstract_ZF, varDict):
     if isinstance(zf.base, abstract_ZF):
         return _sympify_abst_ZF(zf.base, varDict)
-    if isinstance(zf.base, expr_numeric_types()) or expr_head(zf.base) in (
-        HEAD_NUMBER,
-        HEAD_CONSTANT,
+    if isinstance(zf.base, expr_numeric_types()) or op_expr(zf.base) in (
+        OP_NUMBER,
+        OP_CONSTANT,
     ):
         return [zf.base], varDict
     if isinstance(zf.base, zeroFormAtom):
@@ -4156,100 +4205,88 @@ def _sympify_abst_ZF(zf: abstract_ZF, varDict):
     )
 
 
-def _sympy_to_abstract_ZF(expr, subs_rules={}):
+def _engine_to_abstract_ZF(expr, subs_rules={}):
     """
-    Convert a SymPy expression to abstract_ZF format, applying symbol substitutions.
+    Convert a symbolic-engine expression to abstract_ZF format, applying symbol
+    substitutions. Dispatches through the symbolic router, so it accepts expressions
+    from any engine dgcv supports.
 
     Parameters:
-    - expr (sympy.Expr): The SymPy expression to convert.
-    - subs_rules (dict): Dictionary mapping sympy.Symbol instances to zeroFormAtom or abstract_ZF instances.
+    - expr: The engine expression to convert.
+    - subs_rules (dict): Dictionary mapping engine symbols to zeroFormAtom or abstract_ZF instances.
 
     Returns:
     - A tuple representing the expression in abstract_ZF format.
     """
+    head = op_expr(expr)
 
     # Base case: Replace symbols if they are in the substitution dictionary
-    if isinstance(expr, sp.Symbol):
+    if head == OP_SYMBOL:
         return subs_rules.get(expr, expr)  # Replace if found, else return as-is
 
-    # If the expr is already a number (int, float, sympy.Number)
-    if isinstance(expr, (int, float, sp.Number)):
+    # If the expr is already a number
+    if head == OP_NUMBER or (
+        isinstance(expr, numbers.Number) and not isinstance(expr, bool)
+    ):
         return expr  # Directly return simple atomic elements
 
     # Handle operators that map directly to abstract_ZF:
-    if isinstance(expr, sp.Add):
-        return ("add", *[_sympy_to_abstract_ZF(arg, subs_rules) for arg in expr.args])
-
-    if isinstance(expr, sp.Mul):
-        return ("mul", *[_sympy_to_abstract_ZF(arg, subs_rules) for arg in expr.args])
-
-    if isinstance(expr, sp.Pow):
-        if len(expr.args) != 2:
-            raise ValueError("Pow must have exactly 2 arguments.")
-        base, exp = expr.args
+    if head == OP_ADD:
         return (
-            "pow",
-            _sympy_to_abstract_ZF(base, subs_rules),
-            _sympy_to_abstract_ZF(exp, subs_rules),
+            "add",
+            *[_engine_to_abstract_ZF(arg, subs_rules) for arg in expr_operands(expr)],
         )
 
-    # Handle subtraction (rewrite as 'sub' instead of 'add' with negative)
-    if isinstance(expr, sp.Add) and any(
-        isinstance(arg, sp.Mul) and -1 in arg.args for arg in expr.args
-    ):
-        args = list(expr.args)
-        if len(args) == 2 and isinstance(args[1], sp.Mul) and -1 in args[1].args:
-            return (
-                "sub",
-                _sympy_to_abstract_ZF(args[0], subs_rules),
-                _sympy_to_abstract_ZF(args[1].args[1], subs_rules),
-            )
+    if head == OP_MUL:
+        return (
+            "mul",
+            *[_engine_to_abstract_ZF(arg, subs_rules) for arg in expr_operands(expr)],
+        )
 
-    # Handle division (rewrite as 'div' instead of 'mul' with reciprocal)
-    if isinstance(expr, sp.Mul) and any(
-        isinstance(arg, sp.Pow) and arg.args[1] == -1 for arg in expr.args
-    ):
-        num = []
-        denom = []
-        for arg in expr.args:
-            if isinstance(arg, sp.Pow) and arg.args[1] == -1:
-                denom.append(arg.args[0])  # Denominator part
-            else:
-                num.append(arg)  # Numerator part
-
-        if len(num) == 1 and len(denom) == 1:
-            return (
-                "div",
-                _sympy_to_abstract_ZF(num[0], subs_rules),
-                _sympy_to_abstract_ZF(denom[0], subs_rules),
-            )
+    if head == OP_POW:
+        args = expr_operands(expr)
+        if len(args) != 2:
+            raise ValueError("Pow must have exactly 2 arguments.")
+        base, exp = args
+        return (
+            "pow",
+            _engine_to_abstract_ZF(base, subs_rules),
+            _engine_to_abstract_ZF(exp, subs_rules),
+        )
 
     # Handle conjugation
-    if expr_head(expr) == HEAD_CONJUGATE:
+    if head == OP_CONJUGATE:
         return (
-            abstract_ZF(_sympy_to_abstract_ZF(expr.args[0], subs_rules))
+            abstract_ZF(_engine_to_abstract_ZF(expr_operands(expr)[0], subs_rules))
             ._eval_conjugate()
             .base
         )
 
-    if expr_head(expr) == HEAD_EXP:
-        return ("pow", e_constant(), _sympy_to_abstract_ZF(expr.args[0], subs_rules))
-
-    # Raise error for unsupported operations
-    if isinstance(expr, sp.Function):
-        raise ValueError(
-            f"Unsupported operation: {expr.func.__name__} is not yet supported for the dgcv 0-form classes. Error for type: {type(expr)}"
+    if head == OP_EXP:
+        return (
+            "pow",
+            e_constant(),
+            _engine_to_abstract_ZF(expr_operands(expr)[0], subs_rules),
         )
 
-    if isinstance(expr, sp.Rational):
-        return ("div", expr.p, expr.q)  # Handle rational numbers explicitly
+    # Raise error for unsupported operations
+    if head == OP_FUNCTION:
+        name = getattr(getattr(expr, "func", None), "__name__", None)
+        if name is None:
+            name = str(getattr(expr, "operator", lambda: expr)())
+        raise ValueError(
+            f"Unsupported operation: {name} is not yet supported for the dgcv 0-form classes. Error for type: {type(expr)}"
+        )
 
-    if expr_head(expr) == HEAD_CONSTANT:
+    if head == OP_CONSTANT:
         return expr  # named mathematical constants
 
     raise ValueError(
         f"Unsupported operation: {expr} cannot be mapped to abstract_ZF. Error for type: {type(expr)}"
     )
+
+
+_sympy_to_abstract_ZF = _engine_to_abstract_ZF
 
 
 def _loop_ZF_format_conversions(expr, withSimplify=False, reformatter=None):
@@ -4512,6 +4549,25 @@ _add_sympify_loop_methods(
         "expand_power_base",
     ],
 )
+
+
+def _add_dgcv_conjugate(cls):
+    if not hasattr(cls, "__dgcv_conjugate__"):
+
+        def __dgcv_conjugate__(self, symbolic=False):
+            return self._eval_conjugate()
+
+        cls.__dgcv_conjugate__ = __dgcv_conjugate__
+
+
+for _cls in (
+    zeroFormAtom,
+    abstract_ZF,
+    abstDFAtom,
+    abstDFMonom,
+    abstract_DF,
+):
+    _add_dgcv_conjugate(_cls)
 
 
 for _cls in (

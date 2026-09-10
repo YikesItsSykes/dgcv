@@ -53,8 +53,8 @@ def invalidate_types_and_constants_cache():
         _sympy_re_head, \
         _sympy_im_head, \
         _e_obj, \
-        _head_table, \
-        _head_engine, \
+        _op_table, \
+        _op_engine, \
         _sage_constant_strs
     _atomic_pred = None
     _constant_scalar_types = None
@@ -69,8 +69,8 @@ def invalidate_types_and_constants_cache():
     _sympy_conj_head = None
     _sympy_re_head = None
     _sympy_im_head = None
-    _head_table = None
-    _head_engine = None
+    _op_table = None
+    _op_engine = None
     _sage_constant_strs = None
 
 
@@ -221,24 +221,24 @@ def is_atomic(expr):
 
 
 # expression-tree introspection
-_head_table = None
-_head_engine = None
+_op_table = None
+_op_engine = None
 
-HEAD_ADD = "add"
-HEAD_MUL = "mul"
-HEAD_POW = "pow"
-HEAD_SYMBOL = "symbol"
-HEAD_NUMBER = "number"
-HEAD_CONJUGATE = "conjugate"
-HEAD_EXP = "exp"
-HEAD_LOG = "log"
-HEAD_FUNCTION = "function"
-HEAD_CONSTANT = "constant"
+OP_ADD = "add"
+OP_MUL = "mul"
+OP_POW = "pow"
+OP_SYMBOL = "symbol"
+OP_NUMBER = "number"
+OP_CONJUGATE = "conjugate"
+OP_EXP = "exp"
+OP_LOG = "log"
+OP_FUNCTION = "function"
+OP_CONSTANT = "constant"
 
 _sage_constant_strs = None
 
 
-def _build_head_table():
+def _build_op_table():
     global _sage_constant_strs
     kind = engine_kind()
     table = {}
@@ -258,12 +258,12 @@ def _build_head_table():
             x = sage.SR.var("_dgcv_head_probe_x")
             y = sage.SR.var("_dgcv_head_probe_y")
             for expr, tag in (
-                (x + y, HEAD_ADD),
-                (x * y, HEAD_MUL),
-                (x**y, HEAD_POW),
-                (sage.exp(x), HEAD_EXP),
-                (sage.log(x), HEAD_LOG),
-                (sage.conjugate(x), HEAD_CONJUGATE),
+                (x + y, OP_ADD),
+                (x * y, OP_MUL),
+                (x**y, OP_POW),
+                (sage.exp(x), OP_EXP),
+                (sage.log(x), OP_LOG),
+                (sage.conjugate(x), OP_CONJUGATE),
             ):
                 try:
                     op = expr.operator()
@@ -279,9 +279,9 @@ def _build_head_table():
             sp = _get_sympy_module()
             probe = sp.Symbol("_dgcv_head_probe")
             for expr, tag in (
-                (sp.conjugate(probe), HEAD_CONJUGATE),
-                (sp.exp(probe), HEAD_EXP),
-                (sp.log(probe), HEAD_LOG),
+                (sp.conjugate(probe), OP_CONJUGATE),
+                (sp.exp(probe), OP_EXP),
+                (sp.log(probe), OP_LOG),
             ):
                 try:
                     table[expr.func] = tag
@@ -293,42 +293,42 @@ def _build_head_table():
     return table
 
 
-def _get_head_table():
-    global _head_table, _head_engine
+def _get_op_table():
+    global _op_table, _op_engine
     kind = engine_kind()
-    if _head_table is None or _head_engine != kind:
-        _head_table = _build_head_table()
-        _head_engine = kind
-    return _head_table
+    if _op_table is None or _op_engine != kind:
+        _op_table = _build_op_table()
+        _op_engine = kind
+    return _op_table
 
 
-def expr_head(expr):
+def op_expr(expr):
     kind = engine_kind()
-    table = _get_head_table()
+    table = _get_op_table()
 
     if kind == "sympy":
         sp = _get_sympy_module()
         if isinstance(expr, sp.Basic):
             if isinstance(expr, sp.Number):
-                return HEAD_NUMBER
+                return OP_NUMBER
             if isinstance(expr, sp.NumberSymbol) or expr is sp.I:
-                return HEAD_CONSTANT
+                return OP_CONSTANT
             if isinstance(expr, sp.Symbol):
-                return HEAD_SYMBOL
+                return OP_SYMBOL
             if isinstance(expr, sp.Add):
-                return HEAD_ADD
+                return OP_ADD
             if isinstance(expr, sp.Mul):
-                return HEAD_MUL
+                return OP_MUL
             if isinstance(expr, sp.Pow):
-                return HEAD_POW
+                return OP_POW
             tag = table.get(getattr(expr, "func", None))
             if tag is not None:
                 return tag
             if isinstance(expr, sp.Function):
-                return HEAD_FUNCTION
+                return OP_FUNCTION
             return None
         if isinstance(expr, numbers.Number) and not isinstance(expr, bool):
-            return HEAD_NUMBER
+            return OP_NUMBER
         return None
 
     if kind == "sage":
@@ -342,13 +342,13 @@ def expr_head(expr):
         if SageExpression is not None and isinstance(expr, SageExpression):
             try:
                 if expr.is_symbol():
-                    return HEAD_SYMBOL
+                    return OP_SYMBOL
             except Exception:
                 pass
             if _sage_constant_strs:
                 try:
                     if str(expr) in _sage_constant_strs:
-                        return HEAD_CONSTANT
+                        return OP_CONSTANT
                 except Exception:
                     pass
             try:
@@ -358,33 +358,33 @@ def expr_head(expr):
             if op is None:
                 try:
                     if expr.is_numeric():
-                        return HEAD_NUMBER
+                        return OP_NUMBER
                 except Exception:
                     pass
                 return None
             tag = table.get(op)
             if tag is not None:
                 return tag
-            return HEAD_FUNCTION
+            return OP_FUNCTION
 
         if _sage_constant_strs and not isinstance(expr, numbers.Number):
             try:
                 if str(expr) in _sage_constant_strs:
-                    return HEAD_CONSTANT
+                    return OP_CONSTANT
             except Exception:
                 pass
 
         if isinstance(expr, constant_scalar_types()) and not isinstance(expr, bool):
-            return HEAD_NUMBER
+            return OP_NUMBER
         return None
 
     if isinstance(expr, numbers.Number) and not isinstance(expr, bool):
-        return HEAD_NUMBER
+        return OP_NUMBER
     return None
 
 
 def expr_operands(expr):
-    if expr_head(expr) == HEAD_CONSTANT:
+    if op_expr(expr) == OP_CONSTANT:
         return ()
 
     kind = engine_kind()
@@ -817,7 +817,7 @@ def verify_conjugate_re_im_free(expr) -> bool:
                 if callable(op):
                     try:
                         o = op()
-                        if conj is not None and o == conj:
+                        if conj is not None and o is not None and bool(o == conj):
                             return True
                     except Exception:
                         pass
