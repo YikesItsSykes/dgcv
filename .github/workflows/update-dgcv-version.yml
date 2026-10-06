@@ -4,37 +4,69 @@ on:
   workflow_dispatch:
   release:
     types: [published]
-
+    
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  bump-version:
-    name: Bump dgcv version include
+  push-version-include:
+    name: Push dgcv version include to realandimaginary.com
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          ref: main
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Copy setup.cfg and README.md via scp
+      - name: Build include files
         run: |
-          cat << 'EOF' > deploy_key.pem
-          ${{ secrets.DGCV_TO_RAI_KEY }}
-          EOF
-          chmod 600 deploy_key.pem
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no -P "${{ secrets.RAISSH }}" \
-              "${{ secrets.MEATRAI }}@${{ secrets.RAIHOME }}" \
-              "mkdir -p ~/realandimaginary.com/includes/dgcv"
-          VERSION=$(grep -E '^version\s*=' setup.cfg | head -1 | sed -E 's/version\s*=\s*//')
+          set -euo pipefail
           mkdir -p includes/dgcv
-          echo -n "${VERSION}" > includes/dgcv/dgcv_version.txt
-          RELD_FMT=$(date '+%B %-d, %Y')
-          echo -n "$RELD_FMT" > includes/dgcv/latest-rel-date.txt
-          scp -i deploy_key.pem -o StrictHostKeyChecking=no -P "${{ secrets.RAISSH }}" \
-              setup.cfg README.md includes/dgcv/dgcv_version.txt includes/dgcv/latest-rel-date.txt \
-              "${{ secrets.MEATRAI }}@${{ secrets.RAIHOME }}:/home/${{ secrets.MEATRAI }}/realandimaginary.com/includes/dgcv/"
-          rm deploy_key.pem
+          python3 - <<'PY'
+          import configparser, pathlib
+          cfg = configparser.ConfigParser()
+          cfg.read("setup.cfg")
+          version = cfg["metadata"]["version"].strip()
+          if not version or version.startswith("attr:"):
+              raise SystemExit(f"Could not read a literal version from setup.cfg: {version!r}")
+          pathlib.Path("includes/dgcv/dgcv_version.txt").write_text(version)
+          PY
+          # Release date in UTC, e.g. "October 6, 2026"
+          TZ=UTC date '+%B %-d, %Y' | tr -d '\n' > includes/dgcv/latest-rel-date.txt
+          echo "Version: $(cat includes/dgcv/dgcv_version.txt)"
+          echo "Date:    $(cat includes/dgcv/latest-rel-date.txt)"
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.DGCV_TO_RAI_KEY }}
+          KNOWN_HOSTS: ${{ secrets.RAI_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          # Load the key into an agent so it never touches the disk
+          eval "$(ssh-agent -s)"
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' | ssh-add -
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+      - name: Upload files
+        env:
+          RAI_USER: ${{ secrets.MEATRAI }}
+          RAI_HOST: ${{ secrets.RAIHOME }}
+          RAI_PORT: ${{ secrets.RAISSH }}
+        run: |
+          set -euo pipefail
+          DEST="realandimaginary.com/includes/dgcv"
+          SSH_OPTS=(-o StrictHostKeyChecking=yes -o BatchMode=yes)
+          ssh -p "$RAI_PORT" "${SSH_OPTS[@]}" "$RAI_USER@$RAI_HOST" "mkdir -p ~/$DEST"
+          scp -P "$RAI_PORT" "${SSH_OPTS[@]}" \
+            setup.cfg README.md \
+            includes/dgcv/dgcv_version.txt includes/dgcv/latest-rel-date.txt \
+            "$RAI_USER@$RAI_HOST:$DEST/"
+
+      - name: Stop SSH agent
+        if: always()
+        run: ssh-agent -k || true
