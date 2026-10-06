@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..._aux._backends._engine import engine_capability
 from ..._aux._backends._polynomials import (
     expr_union_primitives,
 )
@@ -24,12 +25,14 @@ from ..._aux._vmf._safeguards import (
 )
 from ..._aux._vmf.vmf import clearVar, listVar, order_coordinates, vmf_lookup
 from ...core.arrays import freeze_matrix, matrix_dgcv
+from ..aec import algebra_element_class
 from ...core.conversions.conversions import cleanUpConjugation
 from ...core.solvers import solve_dgcv
 from .heating import _timed_progress_call
 from .util import (
     _indep_check,
     _solve_weight_kwargs,
+    _span_solver,
     killingForm,
 )
 
@@ -485,7 +488,13 @@ def is_semisimple(
     def _killing_det():
         if target_alg._killing_form is None:
             target_alg._killing_form = freeze_matrix(killingForm(target_alg))
-        return simplify(target_alg._killing_form.det())
+        kf = target_alg._killing_form
+        generic_det = engine_capability("generic_det")
+        if generic_det is not None:
+            probe = generic_det(kf)
+            if probe is not None:
+                return probe
+        return simplify(kf.det())
 
     det = _timed_progress_call(
         _killing_det,
@@ -755,26 +764,97 @@ def compute_simple_subalgebras(
     return target_alg._Levi_deco_cache["simple_ideals"]
 
 
-def compute_derived_algebra(target_alg):
+def _cache_derived_algebra(target_alg, spanners, lazy):
+    if lazy:
+        if target_alg._derived_subalg_lazy_cache is None:
+            target_alg._derived_subalg_lazy_cache = target_alg.subalgebra(
+                spanners, span_warning=False, simplify_basis=True, lazy_structure=True
+            )
+        return target_alg._derived_subalg_lazy_cache
+    if target_alg._derived_subalg_cache is None:
+        lazy_cached = target_alg._derived_subalg_lazy_cache
+        if lazy_cached is not None:
+            lazy_cached._materialize_structure_data()
+            target_alg._derived_subalg_cache = lazy_cached
+        else:
+            target_alg._derived_subalg_cache = target_alg.subalgebra(
+                spanners, span_warning=False, simplify_basis=True
+            )
+    return target_alg._derived_subalg_cache
+
+
+def _derived_algebra(target_alg, lazy):
+    cached = (
+        target_alg._derived_subalg_lazy_cache if lazy else target_alg._derived_subalg_cache
+    )
+    if cached is not None:
+        return cached
+    if not lazy and target_alg._derived_subalg_lazy_cache is not None:
+        return _cache_derived_algebra(target_alg, None, False)
+    if lazy and target_alg._derived_subalg_cache is not None:
+        return target_alg._derived_subalg_cache
+    commutators = []
+    basis = target_alg.basis
+    dim = len(basis)
+    skew = target_alg.is_skew_symmetric()
+    for j in range(dim):
+        el1 = basis[j]
+        lIdx = j + 1 if skew else 0
+        for k in range(lIdx, dim):
+            commutators.append(el1 * basis[k])
+    return _cache_derived_algebra(target_alg, commutators, lazy)
+
+
+def compute_derived_algebra(target_alg, lazy_structure=False):
     target_alg._set_product_protocol()
 
     ###!!!
     # target_alg._require_lie_algebra("compute_derived_algebra")
 
-    if target_alg._derived_subalg_cache is None:
-        commutators = []
-        basis = target_alg.basis
-        dim = len(basis)
-        skew = target_alg.is_skew_symmetric()
-        for j in range(dim):
-            el1 = basis[j]
-            lIdx = j + 1 if skew else 0
-            for k in range(lIdx, dim):
-                commutators.append(el1 * basis[k])
-        target_alg._derived_subalg_cache = target_alg.subalgebra(
-            commutators, span_warning=False, simplify_basis=True
-        )
-    return target_alg._derived_subalg_cache
+    return _derived_algebra(target_alg, bool(lazy_structure))
+
+
+def _align_against_fixed(compare_set, old_level, new_level, discrep):
+    solver = _span_solver.build(list(compare_set)) if compare_set else None
+    for idx2 in range(len(old_level)):
+        if discrep == 0:
+            break
+        elem = old_level[-1 - idx2]
+        indep = solver.reduce(elem) if solver is not None else None
+        if indep is None:
+            indep = _indep_check(compare_set, elem)
+        if indep:
+            new_level.insert(0, elem)
+            discrep += -1
+    return new_level
+
+
+def _align_extending(old_level, new_level, discrep, force_heavy_solve=False):
+    solver = None
+    if new_level and not force_heavy_solve:
+        solver = _span_solver.build(list(new_level))
+    for idx2 in range(len(old_level)):
+        if discrep == 0:
+            break
+        elem = old_level[-1 - idx2]
+        indep = None
+        if solver is None and not new_level and not force_heavy_solve:
+            solver = _span_solver.build([elem])
+            if solver is not None:
+                indep = True
+        elif solver is not None:
+            indep = solver.extend(elem)
+        if indep is None:
+            solver = None
+            indep = _indep_check(
+                new_level,
+                elem,
+                force_heavy_solve=force_heavy_solve,
+            )
+        if indep:
+            new_level.insert(0, elem)
+            discrep += -1
+    return new_level
 
 
 def lower_central_series(
@@ -782,9 +862,14 @@ def lower_central_series(
     max_depth=None,
     format_as_subalgebras=False,
     align_nested_bases=False,
+    lazy_structure=False,
 ):
     target_alg._set_product_protocol()
-    scoped_basis = list(target_alg.basis)
+    lazy = getattr(target_alg, "_lazy_structure_data", False)
+    scoped_basis = list(
+        target_alg.basis_in_ambient_alg if lazy else target_alg.basis
+    )
+    scope = target_alg.ambient if lazy else target_alg
     requested_depth = (
         max(target_alg.dimension, 1) if max_depth is None else int(max_depth)
     )
@@ -807,7 +892,7 @@ def lower_central_series(
                 for el2 in scoped_basis:
                     commutator = el1 * el2
                     lower_central.append(commutator)
-            independent_generators = target_alg.filter_independent_elements(
+            independent_generators = scope.filter_independent_elements(
                 lower_central, apply_light_basis_simplification=True
             )
             if len(independent_generators) == 0:
@@ -819,10 +904,8 @@ def lower_central_series(
                 break
             current_basis = independent_generators
             previous_length = len(independent_generators)
-        if len(series) > 1 and target_alg._derived_subalg_cache is None:
-            target_alg._derived_subalg_cache = target_alg.subalgebra(
-                series[1], span_warning=False, simplify_basis=True
-            )
+        if len(series) > 1:
+            _cache_derived_algebra(target_alg, series[1], bool(lazy_structure))
         target_alg._lower_central_series_cache = (
             series,
             False,
@@ -844,14 +927,9 @@ def lower_central_series(
         for idx in range(1, depth):
             old_level = ser[depth - 1 - idx]
             discrep = len(old_level) - len(ser[depth - idx])
-            new_level = list(new_series[0])
-            for idx2 in range(len(old_level)):
-                if discrep == 0:
-                    break
-                elem = old_level[-1 - idx2]
-                if _indep_check(ser[depth - idx], elem):
-                    new_level.insert(0, elem)
-                    discrep += -1
+            new_level = _align_against_fixed(
+                ser[depth - idx], old_level, list(new_series[0]), discrep
+            )
             new_series.insert(0, new_level)
         target_alg._lower_central_series_cache = (
             new_series,
@@ -889,9 +967,14 @@ def derived_series(
     surface_singularities=False,
     simplify_singularities=None,
     force_heavy_solve=False,
+    lazy_structure=False,
 ):
     target_alg._set_product_protocol()
-    scoped_basis = list(target_alg.basis)
+    lazy = getattr(target_alg, "_lazy_structure_data", False)
+    scoped_basis = list(
+        target_alg.basis_in_ambient_alg if lazy else target_alg.basis
+    )
+    scope = target_alg.ambient if lazy else target_alg
     requested_depth = (
         max(target_alg.dimension, 1) if max_depth is None else int(max_depth)
     )
@@ -921,7 +1004,7 @@ def derived_series(
                 start = count + 1 if target_alg.is_skew_symmetric() else 0
                 for idx2 in range(start, level_len):
                     derived.append(el1 * current_basis[idx2])
-            out = target_alg.filter_independent_elements(
+            out = scope.filter_independent_elements(
                 derived,
                 apply_light_basis_simplification=True,
                 surface_singularities=surface_singularities,
@@ -961,10 +1044,8 @@ def derived_series(
                 target_alg._singularities["derived_series"] = [
                     v for v in total_sing if get_free_symbols(v)
                 ]
-        if len(series) > 1 and target_alg._derived_subalg_cache is None:
-            target_alg._derived_subalg_cache = target_alg.subalgebra(
-                series[1], span_warning=False, simplify_basis=True
-            )
+        if len(series) > 1:
+            _cache_derived_algebra(target_alg, series[1], bool(lazy_structure))
         target_alg._derived_series_cache = (series, False)  # series, alignment bool
         target_alg._derived_series_terminated = terminated
         target_alg._derived_series_depth = requested_depth
@@ -989,18 +1070,9 @@ def derived_series(
         for idx in range(build_step, depth):
             old_level = ser[depth - 1 - idx]
             discrep = len(old_level) - len(ser[depth - idx])
-            new_level = list(new_series[0])
-            for idx2 in range(len(old_level)):
-                if discrep == 0:
-                    break
-                elem = old_level[-1 - idx2]
-                if _indep_check(
-                    new_level,
-                    elem,
-                    force_heavy_solve=force_heavy_solve,
-                ):
-                    new_level.insert(0, elem)
-                    discrep += -1
+            new_level = _align_extending(
+                old_level, list(new_series[0]), discrep, force_heavy_solve
+            )
             new_series.insert(0, new_level)
         target_alg._derived_series_cache = (new_series, True)  # series, alignment bool
     if format_as_subalgebras:
@@ -1031,6 +1103,7 @@ def radical(
     surface_singularities=False,
     simplify_singularities=None,
     force_heavy_solve=False,
+    lazy_structure=False,
 ):
     if (
         target_alg._radical_cache is not None
@@ -1042,7 +1115,7 @@ def radical(
         target_alg._radical_cache = target_alg.subalgebra([], span_warning=False)
         target_alg._radical_heavy = True
     elif target_alg._radical_cache is None:
-        da = target_alg.compute_derived_algebra()
+        da = _derived_algebra(target_alg, True)
         genElem, variables = linear_combination(
             target_alg.basis_in_ambient_alg, _disposable=True
         )
@@ -1086,14 +1159,24 @@ def radical(
             freeVars = {v for v in freeVars if v not in target_alg._parameters}
         if len(freeVars) != 0:
             freeVars = sorted(freeVars, key=str)
-            zeroing = {v: 0 for v in freeVars}
-            radSpanners = [genSol.subs({**zeroing, var: 1}) for var in freeVars]
+            radSpanners = None
+            linear_one_hot = engine_capability("linear_one_hot")
+            if linear_one_hot is not None:
+                parts = linear_one_hot(genSol.coeff_dict, freeVars)
+                if parts is not None:
+                    radSpanners = [
+                        algebra_element_class(genSol.algebra, part, genSol.valence)
+                        for part in parts
+                    ]
+            if radSpanners is None:
+                zeroing = {v: 0 for v in freeVars}
+                radSpanners = [genSol.subs({**zeroing, var: 1}) for var in freeVars]
         else:
             radSpanners = []
         if force_heavy_solve:
             radSpanners = [simplify(sp) for sp in radSpanners]
         target_alg._radical_cache = target_alg.subalgebra(
-            radSpanners, span_warning=False
+            radSpanners, span_warning=False, lazy_structure=lazy_structure
         )
         target_alg._radical_heavy = bool(force_heavy_solve)
         clearVar(*listVar(temporary_only=True), report=False)

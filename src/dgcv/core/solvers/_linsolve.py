@@ -1,7 +1,7 @@
 import random
 
 from ..._aux._backends._calculus import diff
-from ..._aux._backends._engine import _get_sage_module, engine_kind
+from ..._aux._backends._engine import _get_sage_module, engine_capability, engine_kind
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     get_free_symbols,
@@ -365,6 +365,11 @@ def _dgcv_linsolve(
     var_columns = {str(v): idx for idx, v in enumerate(vars_)}
 
     def _build_and_solve(eqns):
+        builtin_linsolve = engine_capability("linsolve")
+        if builtin_linsolve is not None:
+            builtin = builtin_linsolve(eqns, vars_, return_divisors)
+            if builtin is not None:
+                return builtin
         coeff_entries = {}
         rhs = []
         row_count = 0
@@ -390,10 +395,7 @@ def _dgcv_linsolve(
                 row_has_entry = True
 
             if not row_has_entry and not _is_zero_after_simplify(c0):
-                if return_divisors:
-                    return ([], [c0]) if get_free_symbols(c0) else ([], [])
-                else:
-                    return []
+                return ([], [c0]) if get_free_symbols(c0) else ([], [])
 
             rhs.append(-c0)
             row_count += 1
@@ -412,7 +414,7 @@ def _dgcv_linsolve(
         )
 
         if sol is None:
-            return ([], divs) if return_divisors else []
+            return [], divs
 
         return (dict(zip(system_vars, sol)), divs)
 

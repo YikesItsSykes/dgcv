@@ -270,44 +270,44 @@ class linear_representation(dgcv_class):
                             raise ValueError(
                                 f"The `hom` parameter given to the `linear_representation` initializer does not define an algebra homomorphism. The identity hom(v*w)=hom(v)*hom(w) fails for basis elements {e1} and {e2}, producing hom(v*w)={p1} and hom(v)*hom(w)={p2}"
                             )
-                    if anti is None:
-                        anti = False
+        if anti is None:
+            anti = False
+
+        columns = dict()
+        for k, v in getattr(hom.domain, "structureDataDict", dict()).items():
+            columns.setdefault((k[0], k[1]), dict())[k[2]] = v
+        for k, v in getattr(hom.codomain.domain, "structureDataDict", dict()).items():
+            columns.setdefault((k[0] + dom_dim, k[1] + dom_dim), dict())[
+                k[2] + dom_dim
+            ] = v
+        if not is_zero_map:
+            for j in range(dom_dim):
+                action = hom(hom.domain.basis[j])
+                if not callable(action):
+                    continue
+                for k in range(amb_dim - dom_dim):
+                    image = action(hom.codomain.domain.basis[k])
+                    if _scalar_is_zero(image):
+                        continue
+                    column = {
+                        idx + dom_dim: value
+                        for idx, value in image.coeff_dict.items()
+                        if not _scalar_is_zero(value)
+                    }
+                    if not column:
+                        continue
+                    columns[(j, k + dom_dim)] = column
+                    columns[(k + dom_dim, j)] = {
+                        idx: -value for idx, value in column.items()
+                    }
 
         out_sd = matrix_dgcv(
             dict(),
             shape=(amb_dim, amb_dim),
             null_return=matrix_dgcv({}, shape=(amb_dim, 1)),
         )
-        for k, v in getattr(hom.domain, "structureDataDict", dict()).items():
-            new_key = (k[0], k[1])
-            if new_key in out_sd:
-                out_sd[new_key][k[2]] = v
-            else:
-                out_sd[new_key] = matrix_dgcv({k[2]: v}, shape=(amb_dim, 1))
-        for k, v in getattr(hom.codomain.domain, "structureDataDict", dict()).items():
-            new_key = (k[0] + dom_dim, k[1] + dom_dim)
-            if new_key in out_sd:
-                out_sd[new_key][k[2] + dom_dim] = v
-            else:
-                out_sd[new_key] = matrix_dgcv({k[2] + dom_dim: v}, shape=(amb_dim, 1))
-        if not is_zero_map:
-            for j in range(dom_dim):
-                for k in range(amb_dim - dom_dim):
-                    image = hom(hom.domain.basis[j])(hom.codomain.domain.basis[k])
-                    if _scalar_is_zero(image):
-                        continue
-                    for idx, value in image.coeff_dict.items():
-                        new_key = (j, k)
-                        if new_key in out_sd:
-                            out_sd[new_key][idx] = value
-                            out_sd[(k, j)][idx] = -value
-                        else:
-                            out_sd[new_key] = matrix_dgcv(
-                                {idx: value}, shape=(amb_dim, 1)
-                            )
-                            out_sd[(k, j)] = matrix_dgcv(
-                                {idx: -value}, shape=(amb_dim, 1)
-                            )
+        for key, column in columns.items():
+            out_sd[key] = matrix_dgcv(column, shape=(amb_dim, 1))
 
         return out_sd, anti, params
 
@@ -321,6 +321,12 @@ class linear_representation(dgcv_class):
         simplify_products_by_default=None,
         _markers=None,
     ):
+        if target_alg.antihomomorphism:
+            raise ValueError(
+                "This representation reverses products (it is an antihomomorphism), so its "
+                "semidirect sum would not be a Lie algebra. If it was built from matrices, "
+                "transpose them: matrices act on column vectors."
+            )
         if simplify_products_by_default is None:
             simplify_products_by_default = getattr(
                 target_alg.domain, "simplify_products_by_default", False
@@ -431,15 +437,15 @@ def _mat_to_tensor(mat, domain, codomain):
     if mat_m is None:
         return mat
 
-    if domain.dimension != mat_m.nrows or codomain.dimension != mat_m.ncols:
+    if domain.dimension != mat_m.ncols or codomain.dimension != mat_m.nrows:
         raise TypeError(
-            "`mat` should be a r-by-s matrix where domain and codomain have dimensions r and s."
+            "`mat` should be a s-by-r matrix where domain and codomain have dimensions r and s."
         )
 
     tp = 0
     for j in range(domain.dimension):
         for k in range(codomain.dimension):
-            tp += mat_m[j, k] * codomain.basis[k] @ domain.basis[j]
+            tp += mat_m[k, j] * codomain.basis[k] @ domain.basis[j]
     return tp
 
 

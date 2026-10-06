@@ -12,13 +12,12 @@ from ..._aux._backends._symbolic_router import (
 from ..._aux._backends._types_and_constants import symbol
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import create_key, get_dgcv_category
-from ...core.dgcv_core import sum_dgcv
 from ...core.solvers import solve_dgcv
 from ._tensor_products import _fast_tensor_products
 
 
 class _symbol_prolongation_stages:
-    def _prolongation_ambient_basis(self, levels, height):
+    def _prolongation_ambient_basis(self, levels, height, use_generators=None):
         get_temp_id = count(-2, -1).__next__
         for temp_idx in [idx for idx in self._aliasing if idx < 0]:
             del self._aliasing[temp_idx]
@@ -29,21 +28,20 @@ class _symbol_prolongation_stages:
             cache_key = (kdeg, kidx)
             data = k_cache.get(cache_key)
             if data is None:
-                data = (_fast_tensor_products(k), self._aliased_expansion(k))
+                data = _fast_tensor_products(k)
                 k_cache[cache_key] = data
             return data
 
         def stamp(j, k, jidx, kidx, jdeg, kdeg):
             new_idx = get_temp_id()
-            ftk, expanded_k = k_data(k, kidx, kdeg)
+            ftk = k_data(k, kidx, kdeg)
             obj = _fast_tensor_products({(new_idx,): 1}, _atomic_index=new_idx)
-            self._aliasing[new_idx] = {
-                "operator": ftk @ j,
-                "_pending": (expanded_k, j),
-            }
+            self._aliasing[new_idx] = {"operator": ftk @ j}
             return obj
 
-        if self._GLA_generators is None:
+        if use_generators is None:
+            use_generators = self._GLA_generators is not None
+        if not use_generators:
             ambient_basis = []
             for weight in self.negWeights:
                 kdeg = height + 1 + weight
@@ -53,55 +51,20 @@ class _symbol_prolongation_stages:
                     for kidx, k in enumerate(levels[kdeg])
                 ]
         else:
-            preBasis = []
+            gens = self._GLA_generators
+            s_atoms = gens["s_atoms"]
             ambient_basis = []
-            for weight, comp in self._GLA_generators["generators"].items():
+            for weight, positions in gens["s_generators"].items():
                 kdeg = height + 1 + weight
-                level_positions = {id(e): i for i, e in enumerate(self.levels[weight])}
-                preBasis += [
-                    stamp(
-                        j,
-                        k,
-                        level_positions.get(id(j), jidx),
-                        kidx,
-                        weight,
-                        kdeg,
-                    )
-                    for jidx, j in enumerate(comp)
-                    for kidx, k in enumerate(levels[kdeg])
-                ]
-
-            def _iter_expand(elem, nested):
-                if isinstance(nested, list):
-                    return _iter_expand(
-                        _iter_expand(elem, nested[0]), nested[1]
-                    ) + _iter_expand(nested[0], _iter_expand(elem, nested[1]))
-                return elem * nested
-
-            def _complete(elem):
-                alias_data = self._aliasing.get(
-                    getattr(elem, "_atomic_index", -1), None
-                )
-                alias = self._alias_expansion(alias_data) if alias_data else None
-                if alias is None:
-                    alias = elem
-                new_terms = []
-                for w, comp in self._GLA_generators["map"].items():
-                    if w == -1:
-                        continue
-                    for trip in comp:
-                        if trip[2] > 1:
-                            new_terms.append(
-                                _fast_tensor_products(_iter_expand(elem, trip[0]))
-                                @ trip[1]  # removed .dual() for fast algo
-                            )
-                if alias_data:
-                    alias_data["expanded"] = _fast_tensor_products(
-                        sum_dgcv(new_terms, alias)
-                    )
-                return elem
-
-            ambient_basis = [_complete(j) for j in preBasis]
+                for s in positions:
+                    for k in levels[kdeg]:
+                        new_idx = get_temp_id()
+                        self._aliasing[new_idx] = {
+                            "operator": _fast_tensor_products(k) @ s_atoms[s]
+                        }
+                        ambient_basis.append(
+                            _fast_tensor_products({(new_idx,): 1}, _atomic_index=new_idx)
+                        )
         return ambient_basis
 
     def _characteristic_space_reduction(
@@ -117,6 +80,8 @@ class _symbol_prolongation_stages:
         solve_method,
     ):
         if with_characteristic_space_reductions is True:
+            if expansions is None:
+                expansions = [self._aliased_expansion(el) for el in new_level]
             if height == -1:
                 z_level = expansions
             else:
@@ -239,6 +204,8 @@ class _symbol_prolongation_stages:
                 component.coords = []
                 continue
             dsGE, dsVars = linear_combination(component.spanners)
+            if expansions is None:
+                expansions = [self._aliased_expansion(el) for el in atomized_level]
             lvlGE, lvlVars = linear_combination(expansions)
             sanVars = list(dsVars) + list(lvlVars)
             residual = dsGE - lvlGE

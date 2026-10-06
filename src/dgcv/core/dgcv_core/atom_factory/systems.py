@@ -49,7 +49,7 @@ def varWithVF(
     rco = [] if return_created_object is True else None
 
     kind = engine_kind()
-    enforce_real = kind is not None and kind != "sympy"
+    enforce_real = kind == "sage"
     enforced_real_dict = (
         variable_registry.get("dgcv_enforced_real_atoms", None)
         if enforce_real

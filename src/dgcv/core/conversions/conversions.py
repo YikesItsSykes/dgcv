@@ -28,7 +28,12 @@ from typing import Any, Dict, Optional, Set, Tuple
 
 from ..._aux._backends._exact_arith import exact_reciprocal
 from ..._aux._backends._symbolic_router import get_free_symbols, simplify, subs
-from ..._aux._backends._types_and_constants import expr_types, imag_unit, is_atomic
+from ..._aux._backends._types_and_constants import (
+    expr_types,
+    imag_unit,
+    is_atomic,
+    to_active_engine,
+)
 from ..._aux._utilities._config import get_variable_registry
 from ..._aux._vmf._safeguards import check_dgcv_category
 from ..._aux._vmf.vmf import vmf_lookup
@@ -612,6 +617,7 @@ def _filtered_subs(expr, conv) -> Optional[Dict[Any, Any]]:
 
 
 def _convert_expr(expr, conv, *, convert_everything: bool):
+    expr = to_active_engine(expr)
     if isinstance(expr, numbers.Number):
         return expr
 

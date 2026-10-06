@@ -3,7 +3,6 @@ from numbers import Integral
 from ..._aux._backends._exact_arith import exact_reciprocal
 from ..._aux._backends._symbolic_router import _scalar_is_zero
 from ._coercion import _as_matrix_dgcv
-from ._indexing import _spool
 
 
 class _matrix_arithmetic:
@@ -100,17 +99,28 @@ class _matrix_arithmetic:
         out._engine_representation = dict()
         out._data_unspooled_cache = None
 
-        for i in range(self.nrows):
-            for k in range(self.ncols):
-                a = self[i, k]
-                if _scalar_is_zero(a):
-                    continue
-                for j in range(other_m.ncols):
-                    b = other_m[k, j]
-                    if _scalar_is_zero(b):
-                        continue
-                    idx = _spool((i, j), out.shape)
-                    out._data[idx] = out._data.get(idx, out.null_return) + a * b
+        ncols = self.ncols
+        ocols = other_m.ncols
+        by_row = {}
+        for idx, b in sorted(other_m._data.items()):
+            if b is None or _scalar_is_zero(b):
+                continue
+            k, j = divmod(idx, ocols)
+            by_row.setdefault(k, []).append((j, b))
+        null = out.null_return
+        data = out._data
+        for idx in sorted(self._data):
+            a = self._data[idx]
+            if a is None or _scalar_is_zero(a):
+                continue
+            i, k = divmod(idx, ncols)
+            entries = by_row.get(k)
+            if not entries:
+                continue
+            base = i * ocols
+            for j, b in entries:
+                key = base + j
+                data[key] = data.get(key, null) + a * b
 
         return out
 

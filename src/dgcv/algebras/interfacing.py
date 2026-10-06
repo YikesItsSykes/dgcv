@@ -36,8 +36,7 @@ def structure_equations(
     else:
         atoms = [symbol(str(lab)) for lab in target_alg.basis]
     str_eqns = dict()
-    if list_symbols_as_strings:
-        atoms = [str(atom) for atom in atoms]
+    labels = [str(atom) for atom in atoms] if list_symbols_as_strings else atoms
 
     if abbreviate_for_skew_struct is None:
         abbreviate_for_skew_struct = True if target_alg.is_Lie_algebra() else False
@@ -55,7 +54,7 @@ def structure_equations(
     if formatting == "list":
         str_eqns = [[[k[0], k[1]], v] for k, v in str_eqns.items()]
     return annotated_container(
-        [str_eqns, atoms],
+        [str_eqns, labels],
         _dgcv_notes={
             "signature": "algebra_str_eqns",
             "skew_aware_sparse": abbreviate_for_skew_struct,

@@ -40,14 +40,14 @@ class _array_transforms:
         if skip_none:
             for k, v in self._data.items():
                 if v is not None:
-                    target._data[k] = func(v)
+                    target._data[k] = func(v, **kwargs)
         else:
             n = 1
             for s in self.shape:
                 n *= s
             for k in range(n):
                 v = self._data.get(k, default)
-                target._data[k] = func(v)
+                target._data[k] = func(v, **kwargs)
 
         return target
 
@@ -64,4 +64,4 @@ class _array_transforms:
         return self.apply(f, in_place=False, skip_none=True)
 
     def __dgcv_simplify__(self, *args, **kwargs):
-        return self.apply(simplify, in_place=False, skip_none=True)
+        return self.apply(simplify, in_place=False, skip_none=True, **kwargs)

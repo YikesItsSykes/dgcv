@@ -131,6 +131,8 @@ def LaTeX(obj: Any, removeBARs: bool | None = None, verbose: bool = False) -> st
                         return _unwrap_math_delims(s)
                 except Exception:
                     pass
+            if isinstance(x2, numbers.Number) and not isinstance(x2, bool):
+                return _backend_latex(x2)
             return str(x2)
 
         if check_dgcv_category(x):
@@ -162,6 +164,8 @@ def LaTeX(obj: Any, removeBARs: bool | None = None, verbose: bool = False) -> st
                         return _unwrap_math_delims(s)
                 except Exception:
                     pass
+            if isinstance(x2, numbers.Number) and not isinstance(x2, bool):
+                return _backend_latex(x2)
             return str(x2)
 
         x2 = _try_symToHol(x, removeBARs)
@@ -181,6 +185,8 @@ def LaTeX(obj: Any, removeBARs: bool | None = None, verbose: bool = False) -> st
             except Exception:
                 pass
 
+        if isinstance(x2, numbers.Number) and not isinstance(x2, bool):
+            return _backend_latex(x2)
         return str(x2)
 
     out = _strip_display_dollars(_latex_of(obj)) or ""

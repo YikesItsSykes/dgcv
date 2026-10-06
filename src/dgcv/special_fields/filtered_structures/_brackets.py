@@ -9,19 +9,80 @@ from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import create_key
 from ...algebras import _extract_basis
 from ...core.solvers import solve_knowing_solution_exists
+from ...core.vector_fields_and_differential_forms.decomposition import (
+    _decompose_prepared,
+    _prepared_span,
+)
 from ._tensor_products import _fast_tensor_products
+
+
+def _column_vector(column):
+    return column
+
+
+def _sparse_row(vec):
+    if isinstance(vec, dict):
+        return vec
+    return {i: c for i, c in enumerate(vec) if not _scalar_is_zero(c)}
 
 
 class _symbol_brackets:
     def _alias_expansion(self, alias):
         expanded = alias.get("expanded")
         if expanded is None:
-            pending = alias.pop("_pending", None)
-            if pending is None:
+            if alias.get("_pending_S"):
+                self._materialize_S_atom(alias)
+                expanded = alias.get("expanded")
+                if expanded is not None:
+                    return expanded
+            operator = alias.get("operator")
+            if operator is None:
                 return None
-            expanded = _fast_tensor_products(pending[0] @ pending[1])
+            expanded = self._expand_operator(operator)
             alias["expanded"] = expanded
         return expanded
+
+    def _expand_operator(self, operator):
+        neg = self.negativePart
+        neg_dim = neg.dimension
+        aliasing = self._aliasing
+        alg = operator.algebra if operator.algebra is not None else neg
+        pairs = []
+        leftovers = {}
+        deg = 0
+        for key, c in operator.coeff_dict.items():
+            alias = None
+            if len(key) == 2 and key[0] >= neg_dim:
+                alias = aliasing.get(key[0])
+            if alias is not None and alias.get("_pending_S"):
+                self._materialize_S_atom(alias)
+            image = None if alias is None else self._alias_expansion(alias)
+            if image is None:
+                leftovers[key] = c
+                deg = max(deg, len(key))
+                continue
+            tail = key[1:]
+            pairs.append(
+                (
+                    c,
+                    _fast_tensor_products(
+                        {k + tail: v for k, v in image.coeff_dict.items()},
+                        image.algebra if image.algebra is not None else alg,
+                        _validated=image.degree + 1,
+                    ),
+                )
+            )
+        start = (
+            _fast_tensor_products(leftovers, alg, _validated=deg)
+            if leftovers
+            else _fast_tensor_products(dict(), alg, _validated=0)
+        )
+        if not pairs:
+            return start
+        out = _fast_tensor_products._dgcv_multiadd_scaled(pairs, start)
+        if out.algebra is None:
+            out = _fast_tensor_products(out.coeff_dict, alg, _validated=out.degree)
+        return out
 
     def _aliased_expansion(self, ftp: _fast_tensor_products, partial=False):
         if not isinstance(ftp, _fast_tensor_products):
@@ -29,6 +90,8 @@ class _symbol_brackets:
         aliasing = self._aliasing
         alias = aliasing.get(ftp._atomic_index)
         if alias is not None:
+            if alias.get("_pending_S"):
+                self._materialize_S_atom(alias)
             if partial:
                 operator = alias.get("operator")
                 if operator is not None:
@@ -43,6 +106,8 @@ class _symbol_brackets:
             if len(k) == 1:
                 alias = aliasing.get(k[0])
                 if alias is not None:
+                    if alias.get("_pending_S"):
+                        self._materialize_S_atom(alias)
                     if partial:
                         new_term = alias.get("operator")
                     if new_term is None:
@@ -75,6 +140,9 @@ class _symbol_brackets:
             coeffs = getattr(elem, "coeffs", None)
             if coeffs is not None and len(coeffs) == self.negativePart.dimension:
                 return [coeffs[neg_positions[(weight, t)]] for t in range(len(level))]
+        prepared = _decompose_prepared(elem, level)
+        if prepared is not None:
+            return prepared
         general_elem, tVars = linear_combination(level, _disposable=True)
         eqns = [elem - general_elem]
         sol = solve_knowing_solution_exists(
@@ -131,12 +199,14 @@ class _symbol_brackets:
         for weight in sorted(w for w in self.levels if w >= 0):
             decomps = []
             operators = []
+            stored_flags = []
             for position, elem in enumerate(self.levels[weight]):
                 decomp = (
                     None
                     if reduced
                     else self._stored_hom_decomp(elem, weight, neg_positions)
                 )
+                stored_flags.append(decomp is not None)
                 if decomp is None:
                     decomp = dict()
                     for jdeg, jidx in neg_coords:
@@ -173,11 +243,12 @@ class _symbol_brackets:
                 self.nonneg_levels[weight] = list(self.levels[weight])
             for position, n in enumerate(keep):
                 self._nonneg_atoms[(weight, position)] = next_idx
-                self._aliasing[next_idx] = {
-                    "expanded": _fast_tensor_products(self.levels[weight][position]),
-                    "operator": operators[n],
-                    "hom": decomps[n],
-                }
+                alias = {"operator": operators[n], "hom": decomps[n]}
+                if not stored_flags[n]:
+                    alias["expanded"] = _fast_tensor_products(
+                        self.levels[weight][position]
+                    )
+                self._aliasing[next_idx] = alias
                 forms[(weight, position)] = decomps[n]
                 next_idx += 1
         self.dimension = sum(len(level) for level in self.levels.values())
@@ -261,10 +332,13 @@ class _symbol_brackets:
                         ):
                             rows = None
                             break
-                        vec = rows.setdefault(
-                            (jdeg, jidx), [0] * len(self.levels[kdeg])
-                        )
-                        vec[kidx] += c
+                        vec = rows.setdefault((jdeg, jidx), dict())
+                        vec[kidx] = vec.get(kidx, 0) + c
+                    if rows is not None:
+                        rows = {
+                            coord: {r: vec[r] for r in sorted(vec)}
+                            for coord, vec in rows.items()
+                        }
                 if rows is None:
                     rows = dict()
                     for coord in neg_coords:
@@ -276,16 +350,16 @@ class _symbol_brackets:
                         )
                         if vec is None:
                             return None
-                        rows[coord] = vec
+                        rows[coord] = _sparse_row(vec)
                 for coord in neg_coords:
                     if coord not in rows:
-                        rows[coord] = [0] * len(self.levels[weight + coord[0]])
+                        rows[coord] = dict()
                 table[(weight, m)] = rows
         return table
 
-    def _apply_bracket(self, source, vec, weight, size, action, memo):
-        result = [0] * size
-        for q, c in enumerate(vec):
+    def _apply_bracket(self, source, vec, weight, action, memo):
+        result = dict()
+        for q, c in vec.items():
             if _scalar_is_zero(c):
                 continue
             if weight < 0:
@@ -294,41 +368,66 @@ class _symbol_brackets:
                 contrib = memo.get((source, (weight, q)))
             if contrib is None:
                 return None
-            for r, value in enumerate(contrib):
-                result[r] += c * value
+            for r, value in contrib.items():
+                if type(value) is int:
+                    if value == 0:
+                        continue
+                    if value == 1:
+                        result[r] = result.get(r, 0) + c
+                        continue
+                result[r] = result.get(r, 0) + c * value
         return result
 
     def _action_columns(self, total, neg_coords, action):
         columns = []
         for m in range(len(self.levels[total])):
-            col = []
+            col = dict()
+            offset = 0
             for coord in neg_coords:
-                col += action[(total, m)][coord]
+                for r, value in action[(total, m)][coord].items():
+                    col[offset + r] = value
+                offset += len(self.levels[total + coord[0]])
             columns.append(col)
         return columns
 
     def _jacobi_bracket(
         self, first, second, total, neg_coords, columns, action, memo, try_hard=False
     ):
-        rhs = []
+        rhs = dict()
+        offset = 0
         for coord in neg_coords:
-            size = len(self.levels[total + coord[0]])
             left = self._apply_bracket(
-                first, action[second][coord], second[0] + coord[0], size, action, memo
+                first, action[second][coord], second[0] + coord[0], action, memo
             )
             right = self._apply_bracket(
-                second, action[first][coord], first[0] + coord[0], size, action, memo
+                second, action[first][coord], first[0] + coord[0], action, memo
             )
             if left is None or right is None:
                 return None
-            rhs += [a - b for a, b in zip(left, right)]
+            for r, value in left.items():
+                rhs[offset + r] = value
+            for r, value in right.items():
+                key = offset + r
+                rhs[key] = rhs[key] - value if key in rhs else -value
+            offset += len(self.levels[total + coord[0]])
         if len(columns) == 0:
-            return [] if all(is_zero_knowing_zero_is_expected(c) for c in rhs) else None
+            if all(is_zero_knowing_zero_is_expected(c) for c in rhs.values()):
+                return dict()
+            return None
+        solver = _prepared_span(columns, _column_vector)
+        if solver is not None:
+            coords = solver.reduce_vector(rhs)
+            if coords is not None:
+                return _sparse_row(coords)
         varLabel = create_key(prefix="_ja")
         tVars = _disposable_symbols(varLabel, len(columns))
+        rows = set(rhs)
+        for col in columns:
+            rows.update(col)
         eqns = [
-            sum(tVars[m] * columns[m][r] for m in range(len(columns))) - rhs[r]
-            for r in range(len(rhs))
+            sum(tVars[m] * columns[m].get(r, 0) for m in range(len(columns)))
+            - rhs.get(r, 0)
+            for r in sorted(rows)
         ]
         sol = solve_knowing_solution_exists(
             eqns,
@@ -339,7 +438,7 @@ class _symbol_brackets:
         )
         if len(sol) == 0:
             return None
-        return [sol[0].get(var, var) for var in tVars]
+        return _sparse_row([sol[0].get(var, var) for var in tVars])
 
     def _bracket_memo(
         self, neg_positions, neg_coords, action, jacobi_threshold, try_hard=False
@@ -353,7 +452,7 @@ class _symbol_brackets:
             if total % 2 == 0:
                 half = total // 2
                 for s in range(len(self.levels[half])):
-                    memo[((half, s), (half, s))] = [0] * len(self.levels[total])
+                    memo[((half, s), (half, s))] = dict()
             for w1 in range(total // 2 + 1):
                 w2 = total - w1
                 L1, L2 = self.levels[w1], self.levels[w2]
@@ -367,6 +466,8 @@ class _symbol_brackets:
                             vec = self._decompose_in_level(
                                 L1[s1] * L2[s2], total, neg_positions, try_hard
                             )
+                            if vec is not None:
+                                vec = _sparse_row(vec)
                         else:
                             if columns is None:
                                 columns = self._action_columns(
@@ -385,5 +486,5 @@ class _symbol_brackets:
                         if vec is None:
                             return None
                         memo[((w1, s1), (w2, s2))] = vec
-                        memo[((w2, s2), (w1, s1))] = [-c for c in vec]
+                        memo[((w2, s2), (w1, s1))] = {r: -c for r, c in vec.items()}
         return memo

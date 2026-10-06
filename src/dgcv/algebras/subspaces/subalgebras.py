@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import numbers
 
-from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols
+from ..._aux._backends._symbolic_router import (
+    _scalar_is_one,
+    _scalar_is_zero,
+    get_free_symbols,
+)
 from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._utilities._misc import linear_combination
@@ -14,10 +18,15 @@ from ..algebras import algebra_class
 from ..composition.sums import _sa_direct_sum
 from ..creators import createAlgebra
 from ..display.multiplication_table import _sa_multiplication_table
-from ..linear_algebra import _flatten_structure_data, _gather_structure_singularities
+from ..linear_algebra import (
+    _flatten_structure_data,
+    _gather_structure_singularities,
+    _structure_array,
+)
 from ..saec import subalgebra_element
 from ..subspaces import algebra_subspace_class
 from ..threads import _algebra_methods, killingForm
+from ..threads.util import _span_solver
 
 
 class subalgebra_class(_algebra_methods, algebra_subspace_class):
@@ -33,6 +42,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         simplify_products_by_default=None,
         base_field=None,
         _markers={},
+        _lazy_structure_data=False,
         **kwargs,
     ):
         super().__init__(
@@ -49,16 +59,28 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         self.card = _vs_card(self, getattr(self.ambient, "card", None))
 
         basis = self.filtered_basis
-        self.structureData = None
+        self._structure_data = None
+        self._structure_data_dict = None
+        self._lazy_rows = None
+        self._lazy_structure_data = bool(
+            _lazy_structure_data and _internal_lock == retrieve_passkey()
+        )
 
-        if _internal_lock == retrieve_passkey() and simplify_basis is False:
-            if _compressed_structure_data is not None:
-                self.structureData = _compressed_structure_data
-        if self.structureData is None:
-            self.structureData = self.is_subalgebra(return_structure_data=True)[
-                "structure_data"
-            ]
-        self._parameters = get_free_symbols(self.structureData)
+        if self._lazy_structure_data:
+            params = set(getattr(self.ambient, "_parameters", ()) or ())
+            for elem in basis:
+                for v in elem.coeff_dict.values():
+                    params |= set(get_free_symbols(v))
+            self._parameters = params
+        else:
+            if _internal_lock == retrieve_passkey() and simplify_basis is False:
+                if _compressed_structure_data is not None:
+                    self._structure_data = _compressed_structure_data
+            if self._structure_data is None:
+                self._structure_data = self.is_subalgebra(
+                    return_structure_data=True
+                )["structure_data"]
+            self._parameters = get_free_symbols(self._structure_data)
 
         self.basis_in_ambient_alg = tuple(basis)
         self.basis = [
@@ -77,9 +99,10 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         self._dgcv_class_check = retrieve_passkey()
         self._dgcv_category = "subalgebra"
 
-        self.structureDataDict = _flatten_structure_data(
-            self.structureData, _source="subalgebra_class"
-        )
+        if not self._lazy_structure_data:
+            self._structure_data_dict = _flatten_structure_data(
+                self._structure_data, _source="subalgebra_class"
+            )
         _ambient_field = getattr(self.ambient, "base_field", "complex")
         if base_field is None:
             self.base_field = _ambient_field
@@ -99,13 +122,15 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
             or self.ambient.simplify_products_by_default is True
         ):
             self.simplify_products_by_default = True
+        elif self._lazy_structure_data:
+            self.simplify_products_by_default = False
         else:
             self.simplify_products_by_default = simplify_products_by_default
         self._registered = self.ambient._registered
-        if self._parameters:
+        if self._parameters and not self._lazy_structure_data:
             self._singularities = {
                 "structure": _gather_structure_singularities(
-                    self.structureData, self._parameters
+                    self._structure_data, self._parameters
                 )
             }
         else:
@@ -119,6 +144,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         self._lie_algebra_cache = None
         self._killing_form = None
         self._derived_subalg_cache = None
+        self._derived_subalg_lazy_cache = None
         self._derived_series_cache = None
         self._derived_series_terminated = None
         self._derived_series_depth = None
@@ -158,6 +184,75 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
             self._educed_properties["is_solvable"] = t_message
         if ep.get("special_type", None) in {"abelian", "solvable", "nilpotent"}:
             self._educed_properties["special_type"] = ep.get("special_type", None)
+
+    @property
+    def structureData(self):
+        if self._structure_data is None:
+            self._materialize_structure_data()
+        return self._structure_data
+
+    @structureData.setter
+    def structureData(self, value):
+        self._structure_data = value
+        self._structure_data_dict = None
+        self._lazy_structure_data = False
+
+    @property
+    def structureDataDict(self):
+        if self._structure_data_dict is None:
+            if self._structure_data is None:
+                self._materialize_structure_data()
+            self._structure_data_dict = _flatten_structure_data(
+                self._structure_data, _source="subalgebra_class"
+            )
+        return self._structure_data_dict
+
+    @structureDataDict.setter
+    def structureDataDict(self, value):
+        self._structure_data_dict = value
+
+    def _materialize_structure_data(self):
+        self._is_subalgebra = None
+        self._structure_data = self.is_subalgebra(return_structure_data=True)[
+            "structure_data"
+        ]
+        self._structure_data_dict = None
+        self._lazy_structure_data = False
+        self._lazy_rows = None
+        if self._parameters and "structure" not in self._singularities:
+            self._singularities["structure"] = _gather_structure_singularities(
+                self._structure_data, self._parameters
+            )
+
+    def _structure_row(self, idx1, idx2):
+        if not self._lazy_structure_data:
+            return self.structureData[idx1, idx2]
+        rows = self._lazy_rows
+        if rows is None:
+            solver = _span_solver.build(list(self.basis_in_ambient_alg))
+            if solver is None:
+                return self.structureData[idx1, idx2]
+            rows = self._lazy_rows = {"solver": solver, "skew": None}
+        row = rows.get((idx1, idx2))
+        if row is not None:
+            return row
+        amb = self.basis_in_ambient_alg
+        product = amb[idx1] * amb[idx2]
+        out = rows["solver"].reduce(product, return_decomp_coeffs=True)
+        if out is None:
+            return self.structureData[idx1, idx2]
+        if out[0] is True:
+            raise TypeError(
+                "The basis of this lazily constructed subalgebra does not span a subalgebra."
+            )
+        coeffs = {k: v for k, v in out[1][0].items() if not _scalar_is_zero(v)}
+        row = matrix_dgcv(coeffs, shape=(self.dimension, 1))
+        rows[(idx1, idx2)] = row
+        if rows["skew"] is None:
+            rows["skew"] = self.ambient.is_skew_symmetric() is True
+        if rows["skew"] and idx1 != idx2:
+            rows[(idx2, idx1)] = -row
+        return row
 
     @property
     def zero_element(self):
@@ -229,6 +324,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         simplify_basis=False,
         simplify_products_by_default=None,
         base_field=None,
+        lazy_structure=False,
     ):
         elems = [
             (
@@ -238,6 +334,28 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
             )
             for elem in basis
         ]
+        if not lazy_structure and basis:
+            restricted = self._restricted_structure_data(basis, elems, simplify_basis)
+            if restricted is not None:
+                if simplify_products_by_default is None:
+                    simplify_products_by_default = (
+                        self.ambient.simplify_products_by_default
+                    )
+                known = None
+                if self.ambient._parameters:
+                    known = {"basis": list(self._singularities.get("basis", []))}
+                return subalgebra_class(
+                    elems,
+                    self.ambient,
+                    grading=grading,
+                    _compressed_structure_data=restricted,
+                    _internal_lock=retrieve_passkey(),
+                    span_warning=False,
+                    simplify_basis=False,
+                    simplify_products_by_default=simplify_products_by_default,
+                    _known_singularities=known,
+                    base_field=base_field,
+                )
         return self.ambient.subalgebra(
             elems,
             grading=grading,
@@ -245,7 +363,63 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
             span_warning=span_warning,
             simplify_products_by_default=simplify_products_by_default,
             base_field=base_field,
+            lazy_structure=lazy_structure,
         )
+
+    def _restricted_structure_data(self, basis, elems, simplify_basis):
+        pos = self.ambient._basis_index
+        for elem in elems:
+            try:
+                idx = pos.get(elem)
+            except TypeError:
+                idx = None
+            if idx is None:
+                break
+        else:
+            return None
+        index_map = {}
+        for count, elem in enumerate(basis):
+            if (
+                get_dgcv_category(elem) != "subalgebra_element"
+                or elem.algebra is not self
+            ):
+                return None
+            hot = [
+                (idx, v) for idx, v in elem.coeff_dict.items() if not _scalar_is_zero(v)
+            ]
+            if len(hot) != 1 or not _scalar_is_one(hot[0][1]) or hot[0][0] in index_map:
+                return None
+            index_map[hot[0][0]] = count
+        if simplify_basis:
+            for rep in elems:
+                for c in rep.coeffs:
+                    if not _scalar_is_zero(c):
+                        if not get_free_symbols(c) and not _scalar_is_one(c):
+                            return None
+                        break
+        sub_dim = len(basis)
+        columns = {}
+        for (i, j, k), v in self.structureDataDict.items():
+            if i not in index_map or j not in index_map:
+                continue
+            if k in index_map:
+                columns.setdefault((index_map[i], index_map[j]), {})[index_map[k]] = v
+            elif v is not None and not _scalar_is_zero(v):
+                return None
+        skew = self.ambient.is_skew_symmetric()
+        shape = (sub_dim, 1)
+        new_data = {}
+        for count in range(sub_dim):
+            for j in range(count + 1 if skew else 0, sub_dim):
+                col = columns.get((count, j), {})
+                coeff_array = matrix_dgcv(
+                    {idx: col[idx] for idx in sorted(col) if not _scalar_is_zero(col[idx])},
+                    shape=shape,
+                )
+                new_data[(count, j)] = coeff_array
+                if skew:
+                    new_data[(j, count)] = -coeff_array
+        return _structure_array(new_data, sub_dim)
 
     def subspace(self, basis: list | tuple = [], grading=None, span_warning=True):
         elems = [

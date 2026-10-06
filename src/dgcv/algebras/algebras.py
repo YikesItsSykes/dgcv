@@ -569,6 +569,7 @@ class algebra_class(_algebra_methods, dgcv_class):
         simplify_products_by_default=None,
         surface_singularities=None,
         base_field=None,
+        lazy_structure=False,
     ):
         return subalgebra(
             self,
@@ -579,6 +580,7 @@ class algebra_class(_algebra_methods, dgcv_class):
             simplify_products_by_default=simplify_products_by_default,
             surface_singularities=surface_singularities,
             base_field=base_field,
+            lazy_structure=lazy_structure,
         )
 
     def new_alg_from_subalgebra(

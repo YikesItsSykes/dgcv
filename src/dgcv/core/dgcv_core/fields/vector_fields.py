@@ -6,11 +6,13 @@ from typing import Optional
 
 from ...._aux._backends._calculus import diff
 from ...._aux._backends._display import latex as _backend_latex
+from ...._aux._backends._engine import engine_capability
 from ...._aux._backends._symbolic_router import _scalar_is_zero, simplify, subs
 from ...._aux._backends._types_and_constants import (
     check_dgcv_scalar,
     imag_unit,
     rational,
+    to_active_engine,
     verify_conjugate_re_im_free,
 )
 from ...._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
@@ -424,7 +426,7 @@ class vector_field_class(tensor_field_class):
     def __call__(self, *args, ignore_complex_handling=None):
         if len(args) != 1:
             raise ValueError("vector_field expects exactly one argument.")
-        other = args[0]
+        other = to_active_engine(args[0])
 
         if get_dgcv_category(other) == "array":
             return other.apply(self.__call__)
@@ -464,6 +466,11 @@ class vector_field_class(tensor_field_class):
         fmt = self._coordinate_format_info()
 
         if ignore_complex_handling or fmt.get("dgcv_type") == "standard":
+            fast_apply = engine_capability("apply_vector_field")
+            if fast_apply is not None:
+                fast = fast_apply(self, other)
+                if fast is not None:
+                    return fast
             out = 0
             for k, c in self.coeff_dict.items():
                 if _scalar_is_zero(c):
@@ -479,6 +486,12 @@ class vector_field_class(tensor_field_class):
                 v = vs[idx]
                 out += c * diff_local(other, v)
             return out
+
+        fast_apply = engine_capability("apply_complex_vector_field")
+        if fast_apply is not None:
+            fast = fast_apply(self, other)
+            if fast is not None:
+                return fast
 
         half = rational(1, 2)
         imu = imag_unit()

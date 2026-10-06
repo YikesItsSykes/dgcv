@@ -177,7 +177,9 @@ from .core.dgcv_core.decprec import (
 from .eds import (
     DF_representation,
     abst_coframe,
+    abstract_coframe,
     abstract_DF,
+    abstract_differential_form,
     abstract_ZF,
     coframe_derivative,
     createCoframe,
@@ -186,6 +188,8 @@ from .eds import (
     extDer,
     simplify_with_PDEs,
     transform_coframe,
+    zero_form_atom,
+    zero_form_class,
     zeroFormAtom,
 )
 from .special_fields import filtration_tools
@@ -224,8 +228,11 @@ __all__ = [
     "Tanaka_symbol",
     "VF_bracket",
     "abst_coframe",
+    "abstract_coframe",
     "abstract_DF",
     "abstract_ZF",
+    "abstract_differential_form",
+    "zero_form_class",
     "adjointRepresentation",
     "algebraDataFromMatRep",
     "algebra_class",
@@ -336,6 +343,7 @@ __all__ = [
     "wedge",
     "weightedHomogeneousVF",
     "zeroFormAtom",
+    "zero_form_atom",
 ] + [  # deprecated
     "DFClass",
     "STFClass",

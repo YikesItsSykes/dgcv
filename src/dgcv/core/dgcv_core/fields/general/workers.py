@@ -103,6 +103,40 @@ def _format_combinator(formats, seed=None):
     return formatting
 
 
+def _perm_parity(order):
+    n = len(order)
+    seen = [False] * n
+    sign = 1
+    for i in range(n):
+        if seen[i]:
+            continue
+        j = i
+        cycle_len = 0
+        while not seen[j]:
+            seen[j] = True
+            j = order[j]
+            cycle_len += 1
+        if cycle_len % 2 == 0:
+            sign = -sign
+    return sign
+
+
+def _sort_slot_key(slot):
+    idx, valence, syslbl = slot
+    idx_key = (0, int(idx), "") if isinstance(idx, Number) else (1, 0, str(idx))
+    return (str(syslbl), idx_key, int(valence))
+
+
+def _slot_format(idx, sys, _variable_dict):
+    sys_data = _variable_dict.get(sys)
+    if sys_data is None:
+        return None
+    if sys_data.get("type") != "complex":
+        return "standard"
+    b0, b1, b2 = sys_data["breaks"]
+    return "complex" if idx < b1 else "real"
+
+
 def _process_coeffs_dict_new(
     data: Dict[Tuple[Any, ...], Any],
     shape: str,
@@ -118,29 +152,31 @@ def _process_coeffs_dict_new(
     def _parse_key(k, find_format=True, seed=None, inference_dict=None):
         deg = len(k) // 3
         if find_format:
-            kf = _profile_key_full_inference(k, inference_dict=inference_dict)
+            kf = _profile_key_full_inference(
+                k, _variable_dict=vst, inference_dict=inference_dict
+            )
             out_format = _format_combinator(kf, seed=seed)
             return (deg, k, out_format)
         return (deg, k)
 
-    def _sort_slot_key(slot):
-        idx, valence, syslbl = slot
-        idx_key = (0, int(idx), "") if isinstance(idx, Number) else (1, 0, str(idx))
-        return (str(syslbl), idx_key, int(valence))
-
     def _slotify(k, deg):
-        idxs = k[:deg]
-        valence_tuple = k[deg : 2 * deg]
-        syslbls = k[2 * deg :]
-        return tuple((idxs[i], valence_tuple[i], syslbls[i]) for i in range(deg))
+        return tuple(zip(k[:deg], k[deg : 2 * deg], k[2 * deg :]))
 
     def _unslotify(slots):
-        idxs = tuple(s[0] for s in slots)
-        valence_tuple = tuple(s[1] for s in slots)
-        syslbls = tuple(s[2] for s in slots)
-        return idxs + valence_tuple + syslbls
+        idxs, valence_tuple, syslbls = zip(*slots)
+        return tuple(idxs) + tuple(valence_tuple) + tuple(syslbls)
 
     canon: Dict[Tuple[Any, ...], Any] = {}
+    vst = _variable_spaces_types_algo(variable_spaces) if formatting else None
+    merged = False
+    key_cache = {}
+
+    def _slot_key(slot):
+        out = key_cache.get(slot)
+        if out is None:
+            out = _sort_slot_key(slot)
+            key_cache[slot] = out
+        return out
     if formatting:
         out_format = "open"
     for k, v in data.items():
@@ -153,7 +189,11 @@ def _process_coeffs_dict_new(
                 k, seed=out_format, inference_dict=variable_spaces
             )
         if deg <= 1 or shape == "general":
-            canon[kk] = canon.get(kk, 0) + v
+            if kk in canon:
+                canon[kk] = canon[kk] + v
+                merged = True
+            else:
+                canon[kk] = v
             continue
 
         slots = _slotify(kk, deg)
@@ -166,15 +206,20 @@ def _process_coeffs_dict_new(
             nk = _unslotify(sorted_slots)
             vv = v
         else:
-            sign, sorted_slots = tuple(
-                permSign(slots, returnSorted=True, key=_sort_slot_key)
-            )
-            nk = _unslotify(sorted_slots)
+            keys = [_slot_key(s) for s in slots]
+            order = sorted(range(len(slots)), key=keys.__getitem__)
+            sign = _perm_parity(order)
+            nk = _unslotify(tuple(slots[i] for i in order))
             vv = sign * v
 
-        canon[nk] = canon.get(nk, 0) + vv
+        if nk in canon:
+            canon[nk] = canon[nk] + vv
+            merged = True
+        else:
+            canon[nk] = vv
 
-    canon = {k: v for k, v in canon.items() if not _scalar_is_zero(v)}
+    if merged:
+        canon = {k: v for k, v in canon.items() if not _scalar_is_zero(v)}
     if not canon:
         if formatting:
             return {tuple(): 0}, "all", "open"

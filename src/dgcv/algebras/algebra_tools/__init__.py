@@ -19,6 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 from .algebra_tools import (
     Levi_decomposition,
     adjoint_representation,
+    build_linear_representation,
     center,
     derivations,
     derived_subalgebra,
@@ -27,6 +28,7 @@ from .algebra_tools import (
     intersection,
     killing_form,
     multiply,
+    new_graded_algebra_from_old,
     quotient_by_ideal,
     span,
     vector_field_rep_from_linear_rep,
@@ -36,6 +38,7 @@ from .algebra_tools import (
 __all__ = [
     "Levi_decomposition",
     "adjoint_representation",
+    "build_linear_representation",
     "center",
     "derivations",
     "derived_subalgebra",
@@ -44,6 +47,7 @@ __all__ = [
     "intersection",
     "killing_form",
     "multiply",
+    "new_graded_algebra_from_old",
     "quotient_by_ideal",
     "span",
     "vector_field_rep_from_linear_rep",

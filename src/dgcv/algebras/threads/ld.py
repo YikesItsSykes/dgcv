@@ -9,12 +9,14 @@ from ..._aux._backends._symbolic_router import (
 )
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._utilities._misc import linear_combination, zip_sum
+from ..._aux._vmf._safeguards import get_dgcv_category
 from ..._aux._vmf.vmf import order_coordinates
 from ...core.solvers import solve_dgcv
 from .heating import _timed_progress_call
 from .util import (
     _indep_check,
     _solve_weight_kwargs,
+    _span_solver,
     decompose_semisimple_algebra,
 )
 
@@ -52,6 +54,7 @@ def _ldc(
         target_alg._derived_series_cache = None
         target_alg._lower_central_series_cache = None
         target_alg._derived_subalg_cache = None
+        target_alg._derived_subalg_lazy_cache = None
     if surface_singularities is None:
         surface_singularities = True if target_alg._parameters else False
     surface_singularities = bool(surface_singularities)
@@ -147,15 +150,37 @@ def _ldc(
                     discrep = target_alg.dimension - len(local_rad_seq[0])
                     naiveBasis = []
                     augment_NB = list(local_rad_seq[0])
+                    solver = None
+                    if augment_NB and not force_heavy_solve:
+                        solver = _span_solver.build(
+                            [
+                                e.ambient_rep
+                                if get_dgcv_category(e) == "subalgebra_element"
+                                and getattr(e.algebra, "ambient", None) is target_alg
+                                else e
+                                for e in augment_NB
+                            ]
+                        )
                     for elem in target_alg.basis:
                         if len(naiveBasis) == discrep:
                             break
-                        indep = _indep_check(
-                            augment_NB,
-                            elem,
-                            surface_singularities=surface_singularities,
-                            force_heavy_solve=force_heavy_solve,
-                        )
+                        indep = None
+                        if solver is None and not augment_NB and not force_heavy_solve:
+                            solver = _span_solver.build([elem])
+                            if solver is not None:
+                                indep = (True, []) if surface_singularities else True
+                        elif solver is not None:
+                            indep = solver.extend(
+                                elem, surface_singularities=surface_singularities
+                            )
+                        if indep is None:
+                            solver = None
+                            indep = _indep_check(
+                                augment_NB,
+                                elem,
+                                surface_singularities=surface_singularities,
+                                force_heavy_solve=force_heavy_solve,
+                            )
                         if surface_singularities:
                             indep, sing = indep
                             new_sing = target_alg._singularities.get("LD", []) + [
@@ -206,6 +231,10 @@ def _ldc(
                         leading_coeffs = {}
                         trailing_coeffs = {}
                         eqns = []
+                        level_basis = naiveBasis + local_rad_seq[idx]
+                        level_solver = (
+                            None if force_heavy_solve else _span_solver.build(level_basis)
+                        )
                         for idx1 in range(ss_dim):
                             for idx2 in range(idx1 + 1, ss_dim):
                                 w1, w2 = naiveBasis[idx1], naiveBasis[idx2]
@@ -215,20 +244,33 @@ def _ldc(
                                     if target_alg._parameters or surface_singularities
                                     else False
                                 )
-                                lb_decomp = _indep_check(
-                                    naiveBasis + local_rad_seq[idx],
-                                    lb,
-                                    return_decomp_coeffs=True,
-                                    surface_singularities=surfacing,
-                                    force_heavy_solve=force_heavy_solve,
-                                )
-                                if lb_decomp[0] is True and not force_heavy_solve:
+                                lb_decomp = None
+                                if level_solver is not None:
+                                    lb_decomp = level_solver.reduce(
+                                        lb,
+                                        return_decomp_coeffs=True,
+                                        surface_singularities=surfacing,
+                                    )
+                                reduced = lb_decomp is not None
+                                if not reduced:
+                                    lb_decomp = _indep_check(
+                                        level_basis,
+                                        lb,
+                                        return_decomp_coeffs=True,
+                                        surface_singularities=surfacing,
+                                        force_heavy_solve=force_heavy_solve,
+                                    )
+                                if (
+                                    lb_decomp[0] is True
+                                    and not force_heavy_solve
+                                    and not reduced
+                                ):
                                     dgcv_warning(
                                         "The Levi decomposition algorithm encountered a bug caused by solver failing to recognize a zero. Retrying now with the heavier solve algorithm.",
                                         wc_label="debug_log",
                                     )
                                     lb_decomp = _indep_check(
-                                        naiveBasis + local_rad_seq[idx],
+                                        level_basis,
                                         lb,
                                         return_decomp_coeffs=True,
                                         surface_singularities=surfacing,

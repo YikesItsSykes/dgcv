@@ -27,7 +27,7 @@ class algebra_element_class(dgcv_class):
             ) from None
         if valence not in {0, 1}:
             raise TypeError(
-                "vector_space_element expects third argument to be 0 or 1."
+                "algebra_element_class expects third argument to be 0 or 1."
             ) from None
         if isinstance(coeff_dict, dict):
             coeff_dict = {k: v for k, v in coeff_dict.items() if not _scalar_is_zero(v)}
@@ -263,14 +263,14 @@ class algebra_element_class(dgcv_class):
     def __dgcv_simplify__(self, *args, **kwargs):
         return algebra_element_class(
             self.algebra,
-            {idx: simplify(j) for idx, j in self.coeff_dict.items()},
+            {idx: simplify(j, **kwargs) for idx, j in self.coeff_dict.items()},
             self.valence,
         )
 
     def _eval_simplify(self, *args, **kwargs):
         return algebra_element_class(
             self.algebra,
-            {idx: simplify(j) for idx, j in self.coeff_dict.items()},
+            {idx: simplify(j, **kwargs) for idx, j in self.coeff_dict.items()},
             self.valence,
         )
 
@@ -475,9 +475,11 @@ class algebra_element_class(dgcv_class):
                 new_coeffs = dict()
                 for idx1, c1 in self.coeff_dict.items():
                     for idx2, c2 in other.coeff_dict.items():
+                        data = struct[idx1, idx2]._data
+                        if not data:
+                            continue
                         scalar = sign * c1 * c2
-                        row = struct[idx1, idx2]
-                        for idx3, c3 in row._data.items():
+                        for idx3, c3 in data.items():
                             new_coeffs[idx3] = new_coeffs.get(idx3, 0) + (
                                 self._si_wrap(scalar * c3) if spbd else scalar * c3
                             )

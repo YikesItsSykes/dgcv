@@ -19,16 +19,20 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 from .._aux._backends._types_and_constants import symbol
-from .._aux._vmf._safeguards import create_key
-from .eds import abst_coframe, abstDFAtom, abstDFMonom, abstract_DF, extDer
+from .._aux._vmf._safeguards import create_key, validate_label
+from ._calculus import extDer
+from ._coframes import abstract_coframe
+from ._creators import _DFFactory, _register_coframe
+from ._forms import abstract_differential_form, abstract_differential_form_atom, abstract_differential_form_monomial
 
 
 def transform_coframe(
-    original_coframe: abst_coframe,
+    original_coframe: abstract_coframe,
     transformations: list | tuple | dict,
     new_coframe_basis=None,
     new_coframe_labels=None,
     min_conj_rules={},
+    label=None,
 ):
     original_basis = original_coframe.forms
     if new_coframe_basis is None:
@@ -37,9 +41,15 @@ def transform_coframe(
             and all(isinstance(term, str) for term in new_coframe_labels)
             and len(new_coframe_labels) == len(original_basis)
         ):
-            new_coframe_basis = [
-                abstDFAtom(1, 1, label=term) for term in new_coframe_labels
-            ]
+            if label is None:
+                new_coframe_basis = [
+                    abstract_differential_form_atom(1, 1, label=term) for term in new_coframe_labels
+                ]
+            else:
+                new_coframe_basis = [
+                    _DFFactory(term, 1, return_obj=True)["original"]
+                    for term in new_coframe_labels
+                ]
         else:
             raise ValueError(
                 "`transform_coframe` must either be given a list of DF objects for `new_coframe_basis` or a list of string labels for `new_coframe_labels` from which to create a new basis."
@@ -60,7 +70,7 @@ def transform_coframe(
     elif (
         isinstance(transformations, (list, tuple))
         and all(
-            isinstance(term, (abstract_DF, abstDFMonom, abstDFAtom))
+            isinstance(term, (abstract_differential_form, abstract_differential_form_monomial, abstract_differential_form_atom))
             for term in transformations
         )
         and len(transformations) == len(original_basis)
@@ -117,6 +127,12 @@ def transform_coframe(
             )
         new_structure_eqns |= {df_atom: general_elem_new_basis.subs(solution[0])}
 
-    return abst_coframe(
+    new_coframe = abstract_coframe(
         new_coframe_basis, new_structure_eqns, min_conj_rules=min_conj_rules
     )
+    if label is not None:
+        label = validate_label(label)
+        _register_coframe(
+            label, new_coframe, [form.label for form in new_coframe_basis], [], None
+        )
+    return new_coframe

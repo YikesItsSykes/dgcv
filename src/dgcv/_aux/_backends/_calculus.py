@@ -2,10 +2,11 @@
 from numbers import Integral
 
 from ._engine import _get_sage_module, _get_sympy_module, engine_kind, engine_module
-from ._types_and_constants import constant_scalar_types, zero
+from ._types_and_constants import constant_scalar_types, to_active_engine, zero
 
 
 def diff(expr, *args, **kwargs):
+    expr = to_active_engine(expr)
     if not args:
         return expr
 
@@ -60,6 +61,7 @@ def integrate(expr, *args, **kwargs):
     Integrate expr using the active symbolic engine, intended as a backend hook for
     integrate_dgcv (and polynomial integration).
     """
+    expr = to_active_engine(expr)
     kind = engine_kind()
 
     f = getattr(expr, "integrate", None)
@@ -68,6 +70,9 @@ def integrate(expr, *args, **kwargs):
             return f(*args, **kwargs)
         except TypeError:
             return f(*args)
+
+    if kind == "builtin":
+        return engine_module().integrate(expr, *args, **kwargs)
 
     if kind == "sympy":
         sp = engine_module()

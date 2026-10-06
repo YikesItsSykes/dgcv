@@ -33,24 +33,36 @@ from .._backends._cls_coercion import (
     detach_sympy_hook,
 )
 from .._backends._engine import (
+    engine_kind,
     invalidate_engine_cache,
     is_sage_available,
     is_sympy_available,
 )
 from .._backends._notebooks import invalidate_notebook_cache, is_ipython_available
+from .._backends._types_and_constants import (
+    engines_seen,
+    invalidate_types_and_constants_cache,
+    note_engine,
+)
 from .._backends._updates import needs_sympy_hook
 from ._config import (
     dgcv_warning,
     dgcvDeprecationWarning,
     get_dgcv_settings_registry,
     get_variable_registry,
+    on_sage_kernel_inference,
     vlp,
 )
 
 __all__ = ["set_dgcv_settings", "view_dgcv_settings", "reset_dgcv_settings"]
+
+
 # -----------------------------------------------------------------------------
 # utilities
 # -----------------------------------------------------------------------------
+_UNSET = object()
+
+
 def set_dgcv_settings(
     theme: str | None = None,
     format_displays: bool | None = None,
@@ -59,7 +71,8 @@ def set_dgcv_settings(
     version_specific_defaults: str | None = None,
     ask_before_overwriting_objects_in_vmf: bool | None = None,
     forgo_warnings: bool | None = None,
-    default_engine: Literal["sage", "sympy", "dgcv_custom"] | None = None,
+    default_engine: Literal["sage", "sympy", "builtin"] | None = None,
+    secondary_engine: Literal["sage", "sympy", "auto", "none"] | None = _UNSET,
     verbose_label_printing: bool | None = None,
     pass_solve_requests_to_symbolic_engine: bool | None = None,
     use_rank_basis_extraction: bool | None = None,
@@ -71,6 +84,10 @@ def set_dgcv_settings(
     conjugation_prefix: str | None = None,
     fallback_conjugate_prefix: str | None = None,
     simplify_singularity_ideals_by_default: str | None = None,
+    forgo_CAS_provenance_pruning: bool | None = None,
+    forgo_builtin_probabilistic_shortcuts: bool | None = None,
+    secondary_time_budget: float | None = _UNSET,
+    generic_structure_constants: bool | None = _UNSET,
     **kwargs,
 ):
     if kwargs.pop("quick_notebook", False):
@@ -137,11 +154,44 @@ def set_dgcv_settings(
         return bool(v)
 
     def _set_engine_symbolic(new_engine):
+        note_engine(engine_kind())
         if dgcvSR.get("default_symbolic_engine") != new_engine:
             dgcvSR["default_symbolic_engine"] = new_engine
             invalidate_engine_cache()
+            note_engine(new_engine)
 
     def _apply_keyval(k, v):
+        if k == "secondary_symbolic_engine":
+            if v in ("sage", "sagemath"):
+                if is_sage_available():
+                    dgcvSR["secondary_symbolic_engine"] = "sage"
+                else:
+                    dgcv_warning(
+                        "dgcv: requested secondary_engine='sage' but Sage is not available; "
+                        "secondary_symbolic_engine was not changed.",
+                        stacklevel=2,
+                    )
+            elif v == "sympy":
+                if is_sympy_available():
+                    dgcvSR["secondary_symbolic_engine"] = "sympy"
+                else:
+                    dgcv_warning(
+                        "dgcv: requested secondary_engine='sympy' but SymPy is not available; "
+                        "secondary_symbolic_engine was not changed.",
+                        stacklevel=2,
+                    )
+            elif v in ("none", None):
+                dgcvSR["secondary_symbolic_engine"] = None
+            elif v == "auto":
+                dgcvSR["secondary_symbolic_engine"] = "auto"
+            else:
+                dgcv_warning(
+                    f"dgcv: unrecognized secondary_engine value {v!r}. "
+                    "Supported options are 'sympy', 'sage', 'auto', and None. secondary_symbolic_engine was not changed.",
+                    stacklevel=2,
+                )
+            return
+
         if k == "default_symbolic_engine":
             if v in ("sage", "sagemath"):
                 if is_sage_available():
@@ -161,10 +211,12 @@ def set_dgcv_settings(
                         "default_symbolic_engine was not changed.",
                         stacklevel=2,
                     )
+            elif v in ("builtin",):
+                _set_engine_symbolic("builtin")
             else:
                 dgcv_warning(
                     f"dgcv: unrecognized default_engine value {v!r}. "
-                    "Supported options are 'sympy' and 'sage'. Default_symbolic_engine was not changed.",
+                    "Supported options are 'sympy', 'sage', and 'builtin'. Default_symbolic_engine was not changed.",
                     stacklevel=2,
                 )
             return
@@ -297,8 +349,16 @@ def set_dgcv_settings(
             _apply_keyval("default_symbolic_engine", "sage")
         elif engine in ("sympy",):
             _apply_keyval("default_symbolic_engine", "sympy")
+        elif engine in ("builtin",):
+            _apply_keyval("default_symbolic_engine", "builtin")
         else:
             _apply_keyval("default_symbolic_engine", engine)
+
+    if secondary_engine is not _UNSET:
+        _apply_keyval(
+            "secondary_symbolic_engine",
+            None if secondary_engine is None else str(secondary_engine).lower(),
+        )
 
     if format_displays is not None:
         _apply_keyval("format_displays", format_displays)
@@ -373,6 +433,76 @@ def set_dgcv_settings(
     if DEBUG is not None:
         _apply_keyval("DEBUG", DEBUG)
 
+    if forgo_CAS_provenance_pruning is not None:
+        _apply_keyval(
+            "forgo_CAS_provenance_pruning", bool(forgo_CAS_provenance_pruning)
+        )
+        invalidate_types_and_constants_cache()
+
+    if forgo_builtin_probabilistic_shortcuts is not None:
+        _apply_keyval(
+            "forgo_builtin_probabilistic_shortcuts",
+            bool(forgo_builtin_probabilistic_shortcuts),
+        )
+
+    if secondary_time_budget is not _UNSET:
+        budget = None if secondary_time_budget is None else float(secondary_time_budget)
+        _apply_keyval(
+            "secondary_time_budget", budget if budget and budget > 0 else None
+        )
+
+    if generic_structure_constants is not _UNSET:
+        _apply_keyval(
+            "generic_structure_constants",
+            None
+            if generic_structure_constants is None
+            else bool(generic_structure_constants),
+        )
+
+    _provenance_guard(dgcvSR)
+
+
+_provenance_warned = set()
+
+
+def _provenance_guard(dgcvSR):
+    if dgcvSR.get("forgo_CAS_provenance_pruning", False):
+        return
+    kind = engine_kind()
+    if kind == "sympy" and on_sage_kernel_inference():
+        key = "sympy_on_sage_kernel"
+        message = (
+            "dgcv is running the sympy engine on a Sage kernel. Sage's preparser turns "
+            "literals into Sage objects, which dgcv converts to sympy on entry (CAS "
+            "provenance pruning). Set `default_engine='sage'` unless this notebook needs "
+            "sympy, or call `set_dgcv_settings(forgo_CAS_provenance_pruning=True)` to switch "
+            "the conversion off."
+        )
+    elif kind == "sage" and "sympy" in engines_seen():
+        key = "sage_after_sympy"
+        message = (
+            "dgcv switched from the sympy engine to Sage in this session. sympy expressions "
+            "created earlier are converted to Sage on entry (CAS provenance pruning). Call "
+            "`set_dgcv_settings(forgo_CAS_provenance_pruning=True)` to switch the conversion "
+            "off."
+        )
+    elif kind == "builtin" and (engines_seen() & {"sympy", "sage"}):
+        key = "builtin_after_cas"
+        message = (
+            "dgcv switched to its builtin symbolic engine after a CAS engine was active in "
+            "this session. sympy or Sage expressions are converted to builtin zero forms on "
+            "entry (rational expressions only), but objects already registered in the "
+            "variable management framework are not migrated; call `clear_vmf()` and "
+            "recreate variables, or `set_dgcv_settings(forgo_CAS_provenance_pruning=True)` "
+            "to switch the conversion off."
+        )
+    else:
+        return
+    if key in _provenance_warned:
+        return
+    _provenance_warned.add(key)
+    dgcv_warning(message, stacklevel=3)
+
 
 def _toggle_or_set_verbosity(setting=None):
     dgcvSR = get_dgcv_settings_registry()
@@ -402,6 +532,16 @@ def view_dgcv_settings(verbose=False):
             }
             | {key for key in settings.keys() if str(key).startswith("_")}
         )
+    if not settings.get("forgo_CAS_provenance_pruning", False):
+        hidden = hidden | {"forgo_CAS_provenance_pruning"}
+    if not settings.get("forgo_builtin_probabilistic_shortcuts", False):
+        hidden = hidden | {"forgo_builtin_probabilistic_shortcuts"}
+    if settings.get("secondary_time_budget") is None:
+        hidden = hidden | {"secondary_time_budget"}
+    if settings.get("generic_structure_constants") is None:
+        hidden = hidden | {"generic_structure_constants"}
+    if settings.get("secondary_symbolic_engine") is None:
+        hidden = hidden | {"secondary_symbolic_engine"}
     items = [(k, v) for k, v in settings.items() if k not in hidden]
     if settings.get("use_numeric_methods", False):
         items.append(("default_numeric_engine", settings.get("default_numeric_engine")))
@@ -461,6 +601,9 @@ def reset_dgcv_settings():
             "ask_before_overwriting_objects_in_vmf": True,
             "forgo_warnings": False,
             "default_symbolic_engine": default_engine_inference(),
+            "secondary_symbolic_engine": "auto",
+            "secondary_time_budget": None,
+            "generic_structure_constants": None,
             "verbose_label_printing": False,
             "VLP": vlp,
             "conjugation_prefix": "BAR",

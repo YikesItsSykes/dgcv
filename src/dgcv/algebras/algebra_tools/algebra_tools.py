@@ -41,7 +41,7 @@ from ..._aux._utilities._config import dgcv_warning
 from ..._aux._utilities._misc import linear_combination, zip_sum
 from ..._aux._vmf._safeguards import create_key, get_dgcv_category
 from ..._aux._vmf.vmf import first_available_label, vmf_lookup
-from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
+from ...core.arrays import _as_matrix_dgcv, array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.combinatorics.combinatorics import Baker_Campbell_Hausdorff
 from ...core.dgcv_core import createVariables, wedge
 from ...core.morphisms import homomorphism
@@ -49,12 +49,14 @@ from ...core.solvers import solve_dgcv
 from ...core.vector_fields_and_differential_forms import coordinate_vector_field
 from ..algebras import algebra_class
 from ..creators import createAlgebra
+from ..linear_algebra.util import _mat_to_tensor, linear_representation
 from ..subspaces import algebra_subspace_class
 from ..subspaces.subalgebras import subalgebra_class
 from ..threads import _extract_basis, adjointRepresentation, killingForm
 
 __all__ = [
     "adjointRepresentation",
+    "build_linear_representation",
     "derivations",
     "derived_subalgebra",
     "generate_subalgebra",
@@ -62,6 +64,7 @@ __all__ = [
     "killingForm",
     "Levi_decomposition",
     "multiply",
+    "new_graded_algebra_from_old",
     "quotient_by_ideal",
     "span",
     "vector_field_representation",
@@ -715,6 +718,128 @@ def quotient_by_ideal(
         sd_out,
         label=label,
         basis_labels=basis_labels,
+        base_field=algebra.base_field,
+        forgo_vmf_registry=not register_in_vmf,
+        initial_basis_index=initial_basis_index,
+        simplify_products_by_default=simplify_products_by_default,
+        return_created_object=True,
+    )
+
+
+def build_linear_representation(
+    algebra: algebra_class | subalgebra_class,
+    representation_space,
+    action: Sequence,
+) -> linear_representation:
+    if not isinstance(algebra, (algebra_class, subalgebra_class)):
+        raise TypeError(
+            "`build_linear_representation` expects an algebra as its first argument."
+        )
+    if get_dgcv_category(representation_space) not in {
+        "algebra",
+        "subalgebra",
+        "vector_space",
+    }:
+        raise TypeError(
+            "`build_linear_representation` expects a vector space or algebra as its second argument."
+        )
+    if not isinstance(action, (list, tuple)) or len(action) != algebra.dimension:
+        raise ValueError(
+            f"`action` needs one entry per basis element of the acting algebra ({algebra.dimension} in all)."
+        )
+    space = representation_space
+    basis = list(space.basis)
+    zero = 0 * (basis[0] @ basis[0].dual())
+
+    def _is_element(x):
+        return hasattr(x, "coeff_dict") and hasattr(x, "dual")
+
+    def _tensor(entry):
+        if get_dgcv_category(entry) == "tensorProduct":
+            return entry
+        if isinstance(entry, dict):
+            pairs = list(entry.items())
+        elif isinstance(entry, (list, tuple)) and all(
+            isinstance(p, (list, tuple)) and len(p) == 2 and _is_element(p[0])
+            for p in entry
+        ):
+            pairs = list(entry)
+        elif check_dgcv_scalar(entry) and _scalar_is_zero(entry):
+            return zero
+        else:
+            mat = _as_matrix_dgcv(entry)
+            if mat is None or mat.shape != (len(basis), len(basis)):
+                raise TypeError(
+                    "Each entry of `action` should be a dict or list of (basis element, image) pairs, "
+                    "a tensor such as image @ e.dual() + ..., or a square matrix acting on column vectors."
+                )
+            return _mat_to_tensor(mat, space.dual(), space)
+        tp = zero
+        for key, image in pairs:
+            if key not in basis:
+                raise ValueError(
+                    f"`action` maps {key}, which is not a basis element of the representation space."
+                )
+            if check_dgcv_scalar(image) and _scalar_is_zero(image):
+                continue
+            if not _is_element(image) or getattr(image, "algebra", None) != space:
+                raise ValueError(
+                    f"The image of {key} should be an element of the representation space; received {image}."
+                )
+            tp = tp + image @ key.dual()
+        return tp
+
+    tensors = [_tensor(entry) for entry in action]
+    return linear_representation(homomorphism(algebra, [space, space.dual()], tensors))
+
+
+def new_graded_algebra_from_old(
+    algebra: algebra_class | subalgebra_class,
+    *combination_coefficients: Sequence,
+    label: str = None,
+    basis_labels: str | Sequence[str] = None,
+    initial_basis_index: int = 1,
+    simplify_products_by_default: bool = None,
+    register_in_vmf=True,
+) -> algebra_class:
+    if not isinstance(algebra, (algebra_class, subalgebra_class)):
+        raise TypeError(
+            "`new_graded_algebra_from_old` expects an algebra_class or subalgebra_class instance as its first argument."
+        )
+    if not isinstance(label, str) and register_in_vmf is True:
+        raise TypeError(
+            "If setting `register_in_vmf=True` then the `label` parameter must be given a string value."
+        )
+    old_grading = list(getattr(algebra, "grading", None) or [])
+    if len(old_grading) == 0:
+        raise ValueError(
+            "`new_graded_algebra_from_old` requires an algebra with at least one grading vector."
+        )
+    if len(combination_coefficients) == 0:
+        raise ValueError(
+            "`new_graded_algebra_from_old` requires at least one list of combination coefficients."
+        )
+    for coeffs in combination_coefficients:
+        if (
+            not isinstance(coeffs, (list, tuple))
+            or len(coeffs) != len(old_grading)
+            or not all(check_dgcv_scalar(c) for c in coeffs)
+        ):
+            raise ValueError(
+                f"Each list of combination coefficients must be a list or tuple of {len(old_grading)} scalars, one per grading vector of the given algebra. Received {coeffs}"
+            )
+    new_grading = [
+        tuple(
+            sum(c * weights[j] for c, weights in zip(coeffs, old_grading))
+            for j in range(algebra.dimension)
+        )
+        for coeffs in combination_coefficients
+    ]
+    return createAlgebra(
+        algebra,
+        label=label,
+        basis_labels=basis_labels,
+        grading=new_grading,
         base_field=algebra.base_field,
         forgo_vmf_registry=not register_in_vmf,
         initial_basis_index=initial_basis_index,

@@ -8,6 +8,20 @@ from ..._aux.printing._tables import build_plain_table
 from ..._aux.printing.printing._dgcv_display import LaTeX, show
 
 
+_summary_level_limit = 15
+_summary_low_rows = 8
+
+
+def _elide_levels(items, verbose):
+    if verbose or len(items) <= _summary_level_limit:
+        return list(items), 0
+    high = _summary_level_limit - _summary_low_rows
+    return (
+        list(items[:_summary_low_rows]) + [None] + list(items[-high:]),
+        len(items) - _summary_level_limit,
+    )
+
+
 class _symbol_printing:
     def summary(
         self,
@@ -19,6 +33,7 @@ class _symbol_printing:
         plain_text: bool | None = None,
         condense_tensor_labels: bool = True,
         return_displayable: bool = False,
+        verbose: bool = False,
         **kwargs,
     ):
         dgcvSR = get_dgcv_settings_registry()
@@ -36,6 +51,11 @@ class _symbol_printing:
             plain_text = True
 
         levels = self.levels or {}
+        level_items = sorted(levels.items(), key=lambda kv: kv[0])
+        shown_items, omitted = _elide_levels(level_items, verbose)
+        omitted_note = (
+            f"{omitted} graded level{'s' if omitted != 1 else ''} omitted; pass verbose=True to display all"
+        )
         have_prolongations = any(w >= 0 for w in levels.keys())
         if all(len(v) == 0 for w, v in self.nonneg_levels.items() if w >= 1):
             condense_tensor_labels = False
@@ -70,7 +90,11 @@ class _symbol_printing:
             )
             lines = [_header_block(main_title, inner_width)]
 
-            for w, basis in sorted(levels.items(), key=lambda kv: kv[0]):
+            for item in shown_items:
+                if item is None:
+                    lines.append(f"• ... ({omitted_note})")
+                    continue
+                w, basis = item
                 dim_here = len(basis or [])
                 lines.append(f"• graded level {w} ({dim_here} dimensional)")
                 basis_str = ", ".join(str(b) for b in (basis or []))
@@ -127,13 +151,16 @@ class _symbol_printing:
             return str(e)
 
         rows = []
-        sum_computed_dimensions = 0
-        for w, basis in sorted(levels.items(), key=lambda kv: kv[0]):
+        sum_computed_dimensions = sum(len(basis) for _, basis in level_items)
+        for item in shown_items:
+            if item is None:
+                rows.append(["...", "...", omitted_note])
+                continue
+            w, basis = item
             basis_str = ", ".join(_to_string(b, ul=use_latex) for b in basis)
             if display_length is not None and len(basis_str) > display_length:
                 basis_str = "output too long to display; raise `display_length` to a higher bound if needed."
             dim_here = len(basis)
-            sum_computed_dimensions += dim_here
             rows.append([str(w), str(dim_here), basis_str])
 
         footer = [

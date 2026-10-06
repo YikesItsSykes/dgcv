@@ -1,9 +1,53 @@
 from __future__ import annotations
 
-from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols, subs
+from ..._aux._backends._symbolic_router import (
+    _resolve_subs_keys,
+    _scalar_is_zero,
+    get_free_symbols,
+    subs,
+)
 from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
+
+
+def _hom_id_from_decomp(decomp, label, pref, ngla):
+    hidd = dict()
+    for key, v in decomp.items():
+        jidx, kidx, jdeg, kdeg = key
+        try:
+            jfac = ngla[jdeg][jidx]
+            if kdeg < 0:
+                kfac = ngla[kdeg][kidx]
+            else:
+                kfac = f"{pref}_{kidx + 1}__{{[{kdeg}]}}"
+            hidd[(jfac, kfac)] = v
+        except Exception:
+            return None
+    return [hidd, label]
+
+
+def _dict_to_algebra(coeff_dict, alg):
+    basis = getattr(alg, "basis", ())
+    dim = len(basis)
+    new = {}
+    for k, v in coeff_dict.items():
+        if len(k) != 1:
+            return False
+        idx = k[0]
+        if idx < 0 or idx >= dim:
+            return False
+        new[idx] = v
+    if not new:
+        return 0
+    return basis[0]._class_builder(new, 1)
+
+
+def _one_shot_algebra(alg):
+    return (
+        get_dgcv_category(alg) == "algebra"
+        and alg.simplify_products_by_default is not True
+    )
 
 
 class _fast_tensor_products:
@@ -40,11 +84,18 @@ class _fast_tensor_products:
                 if alg is None:
                     self.algebra = coeff_dict.algebra
                 self.degree = 1
-                self.coeff_dict = {
-                    (k,): v
-                    for k, v in enumerate(coeff_dict.coeffs)
-                    if not _scalar_is_zero(v)
-                }
+                if get_dgcv_category(coeff_dict) == "algebra_element":
+                    self.coeff_dict = {
+                        (k,): v
+                        for k, v in sorted(coeff_dict.coeff_dict.items())
+                        if not _scalar_is_zero(v)
+                    }
+                else:
+                    self.coeff_dict = {
+                        (k,): v
+                        for k, v in enumerate(coeff_dict.coeffs)
+                        if not _scalar_is_zero(v)
+                    }
             else:
                 self.coeff_dict = dict()
         else:
@@ -57,6 +108,8 @@ class _fast_tensor_products:
         self._dgcv_category = "fastTensorProduct"
         self._is_zero = None
         self._coeffs = None
+        self._alg_split_cache = None
+        self._to_algebra_cache = None
         if self.degree < max(len(k) for k in self.coeff_dict):
             raise TypeError("ftp init fail")
 
@@ -86,20 +139,64 @@ class _fast_tensor_products:
         return cfs, cfvars
 
     def _to_algebra(self, alg=None):
+        own = alg is None or alg is self.algebra
+        if own and self._to_algebra_cache is not None:
+            return self._to_algebra_cache
         if alg is None:
             alg = self.algebra
+        if _one_shot_algebra(alg):
+            ae = _dict_to_algebra(self.coeff_dict, alg)
+            if own:
+                self._to_algebra_cache = ae
+            return ae
         ae = 0
         basis = getattr(alg, "basis", [])
         dim = len(basis)
         for k, v in self.coeff_dict.items():
             if len(k) != 1:
-                return False
+                ae = False
+                break
             idx = k[0]
             if idx < 0 or idx >= dim:
-                return False
+                ae = False
+                break
             ae += v * basis[idx]
-
+        if own:
+            self._to_algebra_cache = ae
         return ae
+
+    def _alg_split(self):
+        cached = self._alg_split_cache
+        if cached is not None:
+            return cached
+        alg_basis = getattr(self.algebra, "basis", [])
+        alg_dim = len(alg_basis)
+        ae = 0
+        high = {}
+        deg = 0
+        for k, v in self.coeff_dict.items():
+            if len(k) == 1:
+                idx = k[0]
+                if 0 <= idx < alg_dim:
+                    ae += v * alg_basis[idx]
+                    continue
+                dgcv_warning(
+                    "fast_tensor_products non-aliased mul is being tried for aliased elements",
+                    wc_label="debug_log",
+                )
+                continue
+            high[k] = v
+            deg = max(deg, len(k))
+        by_first = {}
+        by_last = {}
+        by_tail = {}
+        for k, v in high.items():
+            by_first.setdefault(k[0], []).append((k[:-1], v))
+            by_last.setdefault(k[-1], []).append((k[1:], v))
+            by_tail.setdefault(k[-1], []).append((k[:-1], v))
+        cached = (ae, high, deg, by_first, by_last, by_tail)
+        self._alg_split_cache = cached
+        return cached
 
     def _convert_to_tp(
         self,
@@ -131,22 +228,7 @@ class _fast_tensor_products:
                 if _hom_id_label:
                     label = _hom_id_label
                 pref, ngla = _hom_id_map
-                hidd = dict()
-                valid = True
-                for key, v in decomp.items():
-                    jidx, kidx, jdeg, kdeg = key
-                    try:
-                        jfac = ngla[jdeg][jidx]
-                        if kdeg < 0:
-                            kfac = ngla[kdeg][kidx]
-                        else:
-                            kfac = f"{pref}_{kidx + 1}__{{[{kdeg}]}}"
-                        hidd[(jfac, kfac)] = v
-                    except Exception:
-                        valid = False
-                        break
-                if valid:
-                    homid = [hidd, label]
+                homid = _hom_id_from_decomp(decomp, label, pref, ngla)
         return tensorProduct(new_dict, _hom_id=homid, _hom_decomp=homdecomp)
 
     def __add__(self, other):
@@ -234,6 +316,7 @@ class _fast_tensor_products:
             deg = start.degree
         elif not (isinstance(start, int) and start == 0):
             residual.append(start)
+        pending = {}
         for c, t in pairs:
             if not isinstance(t, cls):
                 residual.append(c * t)
@@ -245,9 +328,23 @@ class _fast_tensor_products:
                 continue
             for k, v in t.coeff_dict.items():
                 deg = max(deg, len(k))
-                nv = c * v
-                if not _scalar_is_zero(nv):
-                    acc[k] = acc.get(k, 0) + nv
+                lst = pending.get(k)
+                if lst is None:
+                    pending[k] = [(c, v)]
+                else:
+                    lst.append((c, v))
+        for k, lst in pending.items():
+            hook = getattr(type(lst[0][1]), "_dgcv_multiadd_scaled", None)
+            if hook is not None:
+                total = hook(lst, acc.get(k, 0))
+            else:
+                total = acc.get(k, 0)
+                for c, v in lst:
+                    total = total + c * v
+            if _scalar_is_zero(total):
+                acc.pop(k, None)
+            else:
+                acc[k] = total
         out = cls(
             {k: v for k, v in acc.items() if not _scalar_is_zero(v)},
             alg,
@@ -258,7 +355,9 @@ class _fast_tensor_products:
         return out
 
     def __mul__(self, other):
-        if isinstance(other, expr_numeric_types()):
+        if type(other) is not _fast_tensor_products and isinstance(
+            other, expr_numeric_types()
+        ):
             if _scalar_is_zero(other):
                 return _fast_tensor_products({tuple(): 0}, self.algebra, _validated=0)
             return _fast_tensor_products(
@@ -272,7 +371,7 @@ class _fast_tensor_products:
             if self.degree == 1:
                 algebraized = self._to_algebra()
                 if algebraized is not False:
-                    return other * (-algebraized)
+                    return other._mul_alg(algebraized, -1)
             if self.degree == 0:
                 return sum(v * other for v in self.coeff_dict.values())
             if other.degree == 1:
@@ -281,110 +380,86 @@ class _fast_tensor_products:
                     return self * algebraized
             new_dict = dict()
             deg = 0
-            ae1 = 0
-            ae2 = 0
-            alg_basis1, alg_basis2 = (
-                getattr(self.algebra, "basis", []),
-                getattr(other.algebra, "basis", []),
-            )
-            alg_dim1, alg_dim2 = len(alg_basis1), len(alg_basis2)
-            for k1, v1 in self.coeff_dict.items():
-                if len(k1) == 1:
-                    idx1 = k1[0]
-                    if 0 <= idx1 < alg_dim1:
-                        ae1 += v1 * alg_basis1[idx1]
-                        continue
-                    dgcv_warning(
-                        "fast_tensor_products non-aliased mul is being tried for aliased elements",
-                        wc_label="debug_log",
-                    )
-                    continue  ###!!! silent igonore: No multiplication can be defined if idx1>=alg_dim1
+            ae1, self_high, self_deg = self._alg_split()[:3]
+            ae2, other_high, _other_deg, by_first, by_last, _bt = other._alg_split()
+            for k1, v1 in self_high.items():
                 k1L, k1A, k1B, k1T = k1[0], k1[:-1], k1[1:], k1[-1]
-                for k2, v2 in other.coeff_dict.items():
-                    if len(k2) == 1:
-                        idx2 = k2[0]
-                        if 0 <= idx2 < alg_dim2:
-                            ae2 += v2 * alg_basis2[idx2]
-                            continue
-                        dgcv_warning(
-                            "fast_tensor_products non-aliased mul is being tried for aliased elements",
-                            wc_label="debug_log",
-                        )
-                        continue  ###!!! silent igonore: No multiplication can be defined if idx2>=alg_dim2
-                    k2L, k2A, k2B, k2T = k2[0], k2[:-1], k2[1:], k2[-1]
-                    if k1T == k2L:
-                        newkey = k1B + k2A
-                        newval = new_dict.get(newkey, 0) + v1 * v2
-                        if not _scalar_is_zero(newval):
-                            deg = max(len(newkey), deg)
-                            new_dict[newkey] = newval
-                        else:
-                            new_dict.pop(newkey, None)
-                    if k1L == k2T:
-                        newkey = k2B + k1A
-                        newval = new_dict.get(newkey, 0) - v1 * v2
-                        if not _scalar_is_zero(newval):
-                            deg = max(len(newkey), deg)
-                            new_dict[newkey] = newval
-                        else:
-                            new_dict.pop(newkey, None)
-            return (
-                _fast_tensor_products(new_dict, self.algebra, _validated=deg)
-                + ae1 * other
-                + self * ae2
-            )
+                for k2A, v2 in by_first.get(k1T, ()):
+                    newkey = k1B + k2A
+                    newval = new_dict.get(newkey, 0) + v1 * v2
+                    if not _scalar_is_zero(newval):
+                        deg = max(len(newkey), deg)
+                        new_dict[newkey] = newval
+                    else:
+                        new_dict.pop(newkey, None)
+                for k2B, v2 in by_last.get(k1L, ()):
+                    newkey = k2B + k1A
+                    newval = new_dict.get(newkey, 0) - v1 * v2
+                    if not _scalar_is_zero(newval):
+                        deg = max(len(newkey), deg)
+                        new_dict[newkey] = newval
+                    else:
+                        new_dict.pop(newkey, None)
+            out = _fast_tensor_products(new_dict, self.algebra, _validated=deg)
+            if not isinstance(ae1, int):
+                out = out + ae1 * other
+            if self_high and not isinstance(ae2, int):
+                out = out + (
+                    _fast_tensor_products(self_high, self.algebra, _validated=self_deg)
+                    * ae2
+                )
+            return out
         if get_dgcv_category(other) in {
             "algebra_element",
             "subalgebra_element",
         }:
-            if self.degree == 0:
-                return sum(v * other for v in self.coeff_dict.values())
-            if self.degree == 1:
-                algebraized = self._to_algebra()
-                if algebraized is not False:
-                    return algebraized * other
-                else:
-                    dgcv_warning(
-                        "fast_tensor_products non-aliased mul is being tried for aliased elements",
-                        wc_label="debug_log",
-                    )
-                    return self * _fast_tensor_products(other)
-            new_dict = dict()
-            ac = other.coeffs
-            ae1 = 0
-            alg_basis1 = getattr(self.algebra, "basis", [])
-            alg_dim1 = len(alg_basis1)
-            for k1, v1 in self.coeff_dict.items():
-                if len(k1) == 1:
-                    idx1 = k1[0]
-                    if 0 <= idx1 < alg_dim1:
-                        ae1 += v1 * alg_basis1[idx1]
-                        continue
-                    dgcv_warning(
-                        "fast_tensor_products non-aliased mul is being tried for aliased elements",
-                        wc_label="debug_log",
-                    )
-                    continue
-                k1A, k1T = k1[:-1], k1[-1]
-                newval = new_dict.get(k1A, 0) + ac[k1T] * v1
+            return self._mul_alg(other, 1)
+        return NotImplemented
+
+    def _mul_alg(self, other, sign):
+        if self.degree == 0:
+            if sign < 0:
+                other = -other
+            return sum(v * other for v in self.coeff_dict.values())
+        if self.degree == 1:
+            algebraized = self._to_algebra()
+            if algebraized is not False:
+                if sign < 0:
+                    return other * algebraized
+                return algebraized * other
+            dgcv_warning(
+                "fast_tensor_products non-aliased mul is being tried for aliased elements",
+                wc_label="debug_log",
+            )
+            return self * _fast_tensor_products(-other if sign < 0 else other)
+        new_dict = dict()
+        ae1, _high, _deg, _bf, _bl, by_tail = self._alg_split()
+        for idx, c in other.coeff_dict.items():
+            if _scalar_is_zero(c):
+                continue
+            if sign < 0:
+                c = -c
+            for k1A, v1 in by_tail.get(idx, ()):
+                newval = new_dict.get(k1A, 0) + c * v1
                 if not _scalar_is_zero(newval):
                     new_dict[k1A] = newval
                 else:
                     new_dict.pop(k1A, None)
+        algebraized = False
+        if self.degree == 2 and new_dict and _one_shot_algebra(self.algebra):
+            algebraized = _dict_to_algebra(new_dict, self.algebra)
+        if algebraized is False:
             new_tensor = _fast_tensor_products(
                 new_dict, self.algebra, _validated=self.degree - 1
             )
             if self.degree == 2:
                 algebraized = new_tensor._to_algebra()
-                if algebraized is not False:
-                    return algebraized + ae1 * other
-            return (
-                _fast_tensor_products(
-                    new_dict, self.algebra, _validated=self.degree - 1
-                )
-                + ae1 * other
-            )
-        return NotImplemented
+        if isinstance(ae1, int):
+            return new_tensor if algebraized is False else algebraized
+        tail = other * ae1 if sign < 0 else ae1 * other
+        if algebraized is not False:
+            return algebraized + tail
+        return new_tensor + tail
 
     def __rmul__(self, other):
         if isinstance(other, expr_numeric_types()):
@@ -397,6 +472,8 @@ class _fast_tensor_products:
             )
         if self.degree == 0:
             return sum(v * other for v in self.coeff_dict.values())
+        if get_dgcv_category(other) in {"algebra_element", "subalgebra_element"}:
+            return self._mul_alg(other, -1)
         return self * (-other)
 
     def __neg__(self):
@@ -413,10 +490,10 @@ class _fast_tensor_products:
             "algebra_element",
             "subalgebra_element",
         }:
-            ac = other.coeffs
+            ac = other.coeff_dict
             new_dict = dict()
             for k, v in self.coeff_dict.items():
-                for idx, c in enumerate(ac):
+                for idx, c in sorted(ac.items()):
                     if not _scalar_is_zero(c):
                         newkey = k + (idx,)
                         newval = new_dict.get(newkey, 0) + c * v
@@ -447,5 +524,12 @@ class _fast_tensor_products:
         return self.__matmul__(other)
 
     def subs(self, subs_data):
-        new_dict = {k: subs(v, subs_data) for k, v in self.coeff_dict.items()}
+        data = _resolve_subs_keys(self, subs_data)
+        direct = isinstance(data, dict) and not any(type(k) is str for k in data)
+        new_dict = {}
+        for k, v in self.coeff_dict.items():
+            if direct and getattr(v, "_dgcv_category", None) == "abstract_ZF":
+                new_dict[k] = v.subs(data)
+            else:
+                new_dict[k] = subs(v, data)
         return _fast_tensor_products(new_dict, self.algebra, _validated=self.degree)

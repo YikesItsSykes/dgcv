@@ -101,10 +101,10 @@ class _matrix_core:
         if default is None:
             default = self.null_return
         if skip_none:
-            structure = {k: func(v) for k, v in self._data.items() if v is not None}
+            structure = {k: func(v, **kwargs) for k, v in self._data.items() if v is not None}
         else:
             n = self.nrows * self.ncols
-            structure = {k: func(self._data.get(k, default)) for k in range(n)}
+            structure = {k: func(self._data.get(k, default), **kwargs) for k in range(n)}
         if in_place:
             self._data = structure
             self._data_unspooled_cache = None

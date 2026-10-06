@@ -1,3 +1,6 @@
+from fractions import Fraction
+
+from ..._aux._backends._engine import engine_kind
 from ..._aux._backends._exact_arith import exact_reciprocal, ratio
 from ..._aux._backends._symbolic_router import (
     _fast_simplify,
@@ -87,9 +90,16 @@ def _certainly_nonzero(value):
     return False
 
 
+_plain_number_types = (int, Fraction, float)
+
+
 def _pivot_is_zero(value):
+    if type(value) in _plain_number_types:
+        return value == 0
     if _scalar_is_zero(value):
         return True
+    if engine_kind() == "builtin" and getattr(value, "_nf_cache", None) is not None:
+        return False
     if _certainly_nonzero(value):
         return False
     if _expands_to_zero(value):

@@ -56,6 +56,10 @@ class tensorProduct(
     pass
 
 
+from .lazy import _lazy_class
+
+lazy_tensorProduct = _lazy_class(tensorProduct)
+
 tp_core.tensorProduct = tensorProduct
 tp_weights.tensorProduct = tensorProduct
 tp_arithmetic.tensorProduct = tensorProduct

@@ -12,16 +12,16 @@ class _tp_arithmetic:
         new_dict = {j: subs(k, subs_data) for j, k in self.coeff_dict.items()}
         return tensorProduct(new_dict, shape=self.shape)
 
-    def simplify(self):
-        new_dict = {j: simplify(k) for j, k in self.coeff_dict.items()}
+    def simplify(self, **kwargs):
+        new_dict = {j: simplify(k, **kwargs) for j, k in self.coeff_dict.items()}
         return tensorProduct(new_dict, shape=self.shape)
 
     def __dgcv_simplify__(self, *args, **kwargs):
-        new_dict = {key: simplify(value) for key, value in self.coeff_dict.items()}
+        new_dict = {key: simplify(value, **kwargs) for key, value in self.coeff_dict.items()}
         return tensorProduct(new_dict, shape=self.shape)
 
     def _eval_simplify(self, *args, **kwargs):
-        new_dict = {key: simplify(value) for key, value in self.coeff_dict.items()}
+        new_dict = {key: simplify(value, **kwargs) for key, value in self.coeff_dict.items()}
         return tensorProduct(new_dict, shape=self.shape)
 
     def _combine(self, other, sign, op):

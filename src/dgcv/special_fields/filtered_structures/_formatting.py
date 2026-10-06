@@ -16,6 +16,11 @@ def _to_subspace_format(elem, subspace):
 
 
 def _nonnegative_parts_weight(elem, primary_grading, position):
+    stored = getattr(elem, "_properties", {}).get("_weight")
+    if stored is not None:
+        stored_grading, weight = stored
+        if stored_grading is not None and list(stored_grading) == list(primary_grading):
+            return weight
     weight = elem.compute_weight(test_weights=[primary_grading])[0]
     if isinstance(weight, str):
         if weight == "AllW":

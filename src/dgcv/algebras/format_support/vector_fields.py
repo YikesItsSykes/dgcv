@@ -1,5 +1,9 @@
 from ..._aux._backends._calculus import diff
-from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols
+from ..._aux._backends._symbolic_router import (
+    _scalar_is_zero,
+    get_free_symbols,
+    simplify,
+)
 from ..._aux._backends._types_and_constants import symbol
 from ..._aux._vmf._safeguards import create_key
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
@@ -104,6 +108,11 @@ def aDataFromVFWithAnsatz(
                 weight = 0 if grading is None else grading[idx]
                 if weight == new_weight:
                     newcoeff = sol.get(variables[counter])
+                    if (
+                        not _scalar_is_zero(newcoeff)
+                        and get_free_symbols(newcoeff) & coordinates
+                    ):
+                        newcoeff = simplify(newcoeff)
                     if not _scalar_is_zero(newcoeff):
                         params |= get_free_symbols(newcoeff)
                         result[idx] = newcoeff

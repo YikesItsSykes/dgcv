@@ -248,9 +248,9 @@ def _latex_escape_text(s):
 
 
 def convert_to_greek(var_name):
-    for name, greek in greek_letters.items():
-        if var_name.lower().startswith(name):
-            return var_name.replace(name, greek, 1)
+    stem = var_name.rstrip("0123456789")
+    if stem in greek_letters:
+        return greek_letters[stem] + var_name[len(stem) :]
     return var_name
 
 
@@ -573,3 +573,16 @@ def _process_var_label(var, bypass=False) -> str:
     if bypass:
         return var
     return _format_label_with_hi_low(str(var), infer_suffix=True)
+
+
+def _verbose_labels():
+    dgcvSR = get_dgcv_settings_registry()
+    verbosity = dgcvSR.get("__", dict())
+    return dgcvSR.get("verbose_label_printing", False) or "verbose" in verbosity
+
+
+def _process_label(lbl):
+    m = re.search(r"(\d+)$", lbl)
+    if m and "_" not in lbl:
+        lbl = lbl[: m.start(1)] + "_" + m.group(1)
+    return _format_label_with_hi_low(lbl)

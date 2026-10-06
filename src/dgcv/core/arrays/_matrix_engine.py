@@ -1,5 +1,17 @@
-from ..._aux._backends._engine import engine_kind, engine_module
+
+from ..._aux._backends._engine import engine_capability, engine_kind, engine_module
 from ..._aux._utilities._config import dgcv_warning
+
+
+def _builtin_unsupported_matrix(feature):
+    return NotImplementedError(
+        f"{feature} is not available in dgcv's builtin symbolic engine for non-rational data; install sympy or sage and set `default_engine` accordingly"
+    )
+
+
+def _fold(x):
+    return x.numerator if x.denominator == 1 else x
+
 
 
 class _matrix_engine:
@@ -7,7 +19,9 @@ class _matrix_engine:
         if kind is None:
             kind = engine_kind()
         if kind not in ("sage", "sympy"):
-            raise RuntimeError(f"Unsupported engine kind {kind!r}")
+            raise NotImplementedError(
+                f"engine matrices (eigenvalues, engine matrix methods) are not available in the {kind!r} symbolic engine; install sympy or sage and set `default_engine` accordingly"
+            )
 
         rep = self._engine_representation.get(kind, None)
         if rep is not None:
@@ -30,6 +44,9 @@ class _matrix_engine:
     def _eigenvals_dict_by_engine(self, *, kind: str | None = None) -> dict:
         if kind is None:
             kind = engine_kind()
+        if kind == "builtin":
+            _rows, roots = engine_capability("eigen_data")(self)
+            return {_fold(r): m for r, m in roots.items()}
         M = self._to_engine_matrix(kind=kind)
 
         if kind == "sage":
@@ -53,6 +70,27 @@ class _matrix_engine:
     def _eigenvects_by_engine(self, *, kind: str | None = None):
         if kind is None:
             kind = engine_kind()
+        if kind == "builtin":
+            rows, roots = engine_capability("eigen_data")(self)
+            n = self.nrows
+            out = []
+            total = 0
+            for r, mult in roots.items():
+                if rows is not None:
+                    shifted = matrix_dgcv(
+                        [
+                            [_fold(rows[i][j] - (r if i == j else 0)) for j in range(n)]
+                            for i in range(n)
+                        ]
+                    )
+                else:
+                    shifted = self - _fold(r) * matrix_dgcv.identity(n)
+                vecs = shifted.nullspace()
+                total += len(vecs)
+                out.append((_fold(r), int(mult), vecs))
+            if rows is None and total != n:
+                raise _builtin_unsupported_matrix("eigenvectors (parametric matrix)")
+            return out
         M = self._to_engine_matrix(kind=kind)
 
         if kind == "sage":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numbers
 import threading
 
 from .._vmf._safeguards import check_dgcv_category
@@ -67,6 +68,14 @@ def latex(expr, **kwargs) -> str:
         if check_dgcv_category(expr):
             return _strip_math_delims(expr._repr_latex_(raw=True))
 
+        if isinstance(expr, numbers.Rational) and not isinstance(
+            expr, (bool, numbers.Integral)
+        ):
+            n, d = expr.numerator, expr.denominator
+            if n < 0:
+                return f"- \\frac{{{-n}}}{{{d}}}"
+            return f"\\frac{{{n}}}{{{d}}}"
+
         if _is_sympy_obj(expr):
             try:
                 from sympy.printing.latex import LatexPrinter  # type: ignore
@@ -123,6 +132,16 @@ def fast_printable(expr, max_nodes=500, return_count=False):
                 return count
             return False
 
+        base = getattr(current, "base", None)
+        if (
+            base is not None
+            and getattr(current, "_dgcv_category", None) == "abstract_ZF"
+        ):
+            stack.append(base)
+            continue
+        if isinstance(current, tuple) and current and isinstance(current[0], str):
+            stack.extend(current[1:])
+            continue
         if is_sympy:
             if hasattr(current, "args") and current.args:
                 stack.extend(current.args)

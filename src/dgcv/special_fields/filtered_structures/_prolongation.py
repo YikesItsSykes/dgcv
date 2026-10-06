@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import gc
 import numbers
+from contextlib import nullcontext
 from itertools import count
 from typing import TYPE_CHECKING
 
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._vmf._safeguards import retrieve_passkey
+from ...core.tensors import lazy_tensorProduct
 from ._ds import _DS_component, _DS_record
-from ._tensor_products import _fast_tensor_products
+from ._tensor_products import _fast_tensor_products, _hom_id_from_decomp
 
 if TYPE_CHECKING:
     from ._symbol import Tanaka_symbol
@@ -63,6 +66,8 @@ class _symbol_prolongation:
 
             solve_method: str (optional, default=None)
         The `method` forwarded to every equation solve in the prolongation algorithm. Left as None, it resolves to "linear", except when the symbol carries parameters and singularity tracking is off, in which case it resolves to "linear_parametric" - that case solves systems whose coefficients are unreduced parameter-dependent expressions, which the parametric dispatch handles better. Set it to any method `solve_dgcv` accepts to override uniformly. While singularity tracking is on, a non-linear method is rejected with a warning and replaced by "linear", since divisor collection requires a linear method.
+
+        Under the builtin symbolic engine, a symbol with parameters is prolonged on generic structure constants (each distinct primitive structure constant replaced by a fresh symbol, pivots verified nonzero by expansion, results expanded back at the end) unless `set_dgcv_settings(generic_structure_constants=False)`; distinguished-subspace absorption, characteristic-space reductions and compressed equation systems take the direct algorithm.
 
         returns:
         --------
@@ -149,6 +154,11 @@ class _symbol_prolongation:
             )
         )
         get_alias_id = alias_counter.__next__
+        generic = self._generic_mode(
+            with_characteristic_space_reductions,
+            absorb_distinguished_subspaces is True,
+            subspace_data,
+        )
         preprocess_noted = False
         for w in levels:
             if w >= 0:
@@ -172,70 +182,79 @@ class _symbol_prolongation:
                         _fast_tensor_products({(new_idx,): 1}, _atomic_index=new_idx)
                     )
                 levels[w] = reformatted_level
-        for j in range(iterations):
-            if stable:
-                break
-            levels, stable, subspace_data = self._fast_prolong_by_1(
-                levels,
-                height,
-                with_characteristic_space_reductions=with_characteristic_space_reductions,
-                DS_records=subspace_data,
-                absorb_DS=absorb_distinguished_subspaces is True,
-                surface_singularities=track_singularities,
-                simplify_pivots=simplify_pivots,
-                simplify_ideals=simplify_ideals,
-                solve_method=solve_method,
-                alias_counter=get_alias_id,
-            )
-            if report_progress:
-                keys = list(levels.keys())
-                values = list(levels.values())
-                n_cols = len(keys)
-                elision_cell = " … "
-                elision_border = "     "
+        swap = self._generic_structure(generic) if generic is not None else nullcontext()
+        with swap:
+            for j in range(iterations):
+                if stable:
+                    break
+                gc.freeze()
+                try:
+                    levels, stable, subspace_data = self._fast_prolong_by_1(
+                        levels,
+                        height,
+                        with_characteristic_space_reductions=with_characteristic_space_reductions,
+                        DS_records=subspace_data,
+                        absorb_DS=absorb_distinguished_subspaces is True,
+                        surface_singularities=track_singularities,
+                        simplify_pivots=simplify_pivots,
+                        simplify_ideals=simplify_ideals,
+                        solve_method=solve_method,
+                        alias_counter=get_alias_id,
+                        generic=generic,
+                    )
+                finally:
+                    gc.unfreeze()
+                if report_progress:
+                    keys = list(levels.keys())
+                    values = list(levels.values())
+                    n_cols = len(keys)
+                    elision_cell = " … "
+                    elision_border = "     "
 
-                if n_cols > max_report_columns:
-                    seg = max_report_columns // 2
-                    display_keys = keys[:seg] + [None] + keys[-seg:]
-                    display_values = values[:seg] + [None] + values[-seg:]
-                else:
-                    display_keys = keys
-                    display_values = values
+                    if n_cols > max_report_columns:
+                        seg = max_report_columns // 2
+                        display_keys = keys[:seg] + [None] + keys[-seg:]
+                        display_values = values[:seg] + [None] + values[-seg:]
+                    else:
+                        display_keys = keys
+                        display_values = values
 
-                max_len = max(
-                    max(len(str(k)) for k in keys),
-                    max(len(str(len(v))) for v in values),
-                )
-                is_elision = [item is None for item in display_keys]
+                    max_len = max(
+                        max(len(str(k)) for k in keys),
+                        max(len(str(len(v))) for v in values),
+                    )
+                    is_elision = [item is None for item in display_keys]
 
-                def fmt_row(label, items):
-                    cells = []
-                    for item, elide in zip(items, is_elision):
-                        cells.append(
-                            elision_cell if elide else str(item).ljust(max_len)
-                        )
-                    return f"│ {label} │ " + " │ ".join(cells) + " │"
+                    def fmt_row(label, items):
+                        cells = []
+                        for item, elide in zip(items, is_elision):
+                            cells.append(
+                                elision_cell if elide else str(item).ljust(max_len)
+                            )
+                        return f"│ {label} │ " + " │ ".join(cells) + " │"
 
-                def fmt_border(left, mid, right, junction):
-                    segments = []
-                    for elide in is_elision:
-                        segments.append(
-                            elision_border if elide else "─" * (max_len + 2)
-                        )
-                    header_fill = "─" * len("Weights    │")
-                    return f"{left}{header_fill}{mid}" + junction.join(segments) + right
+                    def fmt_border(left, mid, right, junction):
+                        segments = []
+                        for elide in is_elision:
+                            segments.append(
+                                elision_border if elide else "─" * (max_len + 2)
+                            )
+                        header_fill = "─" * len("Weights    │")
+                        return f"{left}{header_fill}{mid}" + junction.join(segments) + right
 
-                weight_strs = [None if k is None else str(k) for k in display_keys]
-                dim_strs = [None if v is None else str(len(v)) for v in display_values]
+                    weight_strs = [None if k is None else str(k) for k in display_keys]
+                    dim_strs = [None if v is None else str(len(v)) for v in display_values]
 
-                print(f"After {count_to_str(prol_counter)} iteration:")
-                print(fmt_border("┌", "┬", "┐", "┬"))
-                print(fmt_row("Weights   ", weight_strs))
-                print(fmt_border("├", "┼", "┤", "┼"))
-                print(fmt_row("Dimensions", dim_strs))
-                print(fmt_border("└", "┴", "┘", "┴"))
-                prol_counter += 1
-            height += 1
+                    print(f"After {count_to_str(prol_counter)} iteration:")
+                    print(fmt_border("┌", "┬", "┐", "┬"))
+                    print(fmt_row("Weights   ", weight_strs))
+                    print(fmt_border("├", "┼", "┤", "┼"))
+                    print(fmt_row("Dimensions", dim_strs))
+                    print(fmt_border("└", "┴", "┘", "┴"))
+                    prol_counter += 1
+                height += 1
+        if generic is not None:
+            self._expand_generic_levels(generic)
         atom_positions = dict()
         for w in levels:
             if w >= 0:
@@ -245,23 +264,48 @@ class _symbol_prolongation:
                         atom_positions[idx] = (w, c)
         neg_lookup = {v: k for k, v in self._negative_basis_positions().items()}
         neg_dim = self.negativePart.dimension
+        neg_basis = self.negativePart.basis
+        card = getattr(
+            getattr(neg_basis[0], "algebra", self.negativePart), "card", None
+        )
+        grading = self.negativePart.grading
+        if isinstance(grading[0], (list, tuple)):
+            grading = grading[0]
         for w in levels:
             if w >= 0:
                 converted = []
                 for c, j in enumerate(levels[w]):
+                    alias = self._aliasing.get(getattr(j, "_atomic_index", -1))
+                    if alias is not None and alias.get("_pending_S"):
+                        self._materialize_S_atom(alias)
                     decomp = self._alias_hom_decomp(
-                        self._aliasing.get(getattr(j, "_atomic_index", -1)),
+                        alias,
                         w,
                         atom_positions,
                         neg_lookup,
                         neg_dim,
                     )
+                    label = f"{self._plp}_{c + 1}__{{[{w}]}}"
+                    if decomp and card is not None:
+                        converted.append(
+                            lazy_tensorProduct(
+                                self._level_thunk(j),
+                                card,
+                                w,
+                                grading=grading,
+                                _hom_id=_hom_id_from_decomp(
+                                    decomp, label, self._plp, self.levels
+                                ),
+                                _hom_decomp=dict(decomp),
+                            )
+                        )
+                        continue
                     converted.append(
                         self._aliased_expansion(j)._convert_to_tp(
                             _hom_id_map=(self._plp, self.levels),
-                            _hom_id_label=f"{self._plp}_{c + 1}__{{[{w}]}}",
+                            _hom_id_label=label,
                             _hom_id=[decomp, ""] if decomp else None,
-                            _decomp_complete=self._GLA_generators is None,
+                            _decomp_complete=True,
                         )
                     )
                 levels[w] = converted
@@ -277,6 +321,8 @@ class _symbol_prolongation:
                     self.negativePart,
                     new_nonneg_parts,
                     assume_FGLA=self.assume_FGLA,
+                    precompute_generators=self._GLA_generators is not None,
+                    compress_equation_systems=self._compress_equation_systems,
                     distinguished_subspaces=self.distinguished_subspaces,
                     assume_NNP_linear_indep=True,
                     index_threshold=levels.index_threshold,
@@ -291,6 +337,13 @@ class _symbol_prolongation:
                 if surface_singularities is True:
                     return levels, self._singularities.get("prolongation", set())
                 return levels
+
+
+    def _level_thunk(self, atom):
+        def thunk():
+            return self._aliased_expansion(atom)._convert_to_tp()
+
+        return thunk
 
 
 _solve_methods = ("linear", "linear_parametric", "linsolve")

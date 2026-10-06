@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..._aux._backends._engine import engine_capability
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     get_free_symbols,
@@ -8,11 +9,16 @@ from ..._aux._backends._symbolic_router import (
 )
 from ..._aux._backends._types_and_constants import rational
 from ..._aux._utilities._config import dgcv_warning
+from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import query_dgcv_categories, retrieve_passkey
 from ...algebras import algebra_class, createAlgebra
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.base import dgcv_class
 from ...core.vector_fields_and_differential_forms import LieDerivative, decompose
+from ...core.vector_fields_and_differential_forms.decomposition import (
+    _decompose_prepared,
+    _prepared_prefix_spans,
+)
 from ._distribution import distribution
 from ._symbol import Tanaka_symbol
 
@@ -92,11 +98,14 @@ class filtration_class(dgcv_class):
                 shape=(dim, dim),
                 null_return=freeze_matrix(matrix_dgcv.zeros(dim, 1)),
             )
+            combo = linear_combination(vfb, _disposable=True) if dim else None
             for c1, vf1 in enumerate(vfb):
                 for c, vf2 in enumerate(vfb[c1 + 1 :]):
                     c2 = c1 + 1 + c
                     bracket = LieDerivative(vf1, vf2)
-                    coeffs = decompose(bracket, vfb, assume_basis=True)[0]
+                    coeffs = decompose(
+                        bracket, vfb, assume_basis=True, _generic_combination=combo
+                    )[0]
                     if len(coeffs) != dim:
                         print(type(bracket))
                         raise ValueError(
@@ -111,8 +120,9 @@ class filtration_class(dgcv_class):
     @property
     def associated_graded_frame_torsion(self):
         if self._graded_frame_torsion is None:
-            ft = self.frame_torsion
-            dim = ft.shape[0]
+            ft = self._frame_torsion
+            vfb = self.vf_basis
+            dim = ft.shape[0] if ft is not None else len(vfb)
             nft = array_dgcv(
                 dict(),
                 shape=(dim, dim),
@@ -147,13 +157,76 @@ class filtration_class(dgcv_class):
                 )
                 return out
 
-            for k, v in ft._data.items():
-                c1, c2 = ft._unspool(k)
-                if c1 > c2:
-                    continue
-                nc = trim(v, find_level(c1) + find_level(c2), c1, c2)
-                nft[c1, c2] = nc
-                nft[c2, c1] = -nc
+            if ft is not None:
+                for k, v in ft._data.items():
+                    c1, c2 = ft._unspool(k)
+                    if c1 > c2:
+                        continue
+                    nc = trim(v, find_level(c1) + find_level(c2), c1, c2)
+                    nft[c1, c2] = nc
+                    nft[c2, c1] = -nc
+            else:
+                combo = None
+                levels = [find_level(idx) for idx in range(dim)]
+                dependence = engine_capability("apply_dependence")
+                deps = (
+                    [dependence(vf) for vf in vfb] if dependence is not None else None
+                )
+                _prepared_prefix_spans(vfb, self.growth_vector)
+                for c1, vf1 in enumerate(vfb):
+                    d1 = deps[c1] if deps is not None else None
+                    for c, vf2 in enumerate(vfb[c1 + 1 :]):
+                        c2 = c1 + 1 + c
+                        level = levels[c1] + levels[c2]
+                        if level > self.depth:
+                            nc = matrix_dgcv({}, shape=(dim, 1))
+                        else:
+                            l_idx = level - 1
+                            ld = 0 if l_idx == 0 else self.growth_vector[l_idx - 1]
+                            ld_inc = self.growth_vector[l_idx]
+                            d2 = deps[c2] if deps is not None else None
+                            if (
+                                d1 is not None
+                                and d2 is not None
+                                and d1[0].isdisjoint(d2[1])
+                                and d2[0].isdisjoint(d1[1])
+                            ):
+                                nc = matrix_dgcv(
+                                    {idx: 0 for idx in range(ld, ld_inc)},
+                                    shape=(dim, 1),
+                                )
+                                nft[c1, c2] = nc
+                                nft[c2, c1] = -nc
+                                continue
+                            bracket = LieDerivative(vf1, vf2)
+                            block = _decompose_prepared(
+                                bracket, vfb[:ld_inc], range(ld, ld_inc)
+                            )
+                            if block is not None:
+                                nc = matrix_dgcv(
+                                    {
+                                        idx + ld: coef
+                                        for idx, coef in enumerate(block[ld:ld_inc])
+                                    },
+                                    shape=(dim, 1),
+                                )
+                            else:
+                                if combo is None and dim:
+                                    combo = linear_combination(vfb, _disposable=True)
+                                coeffs = decompose(
+                                    bracket,
+                                    vfb,
+                                    assume_basis=True,
+                                    _generic_combination=combo,
+                                    _coordinate_indices=range(ld, dim),
+                                )[0]
+                                if len(coeffs) != dim:
+                                    raise ValueError(
+                                        f"The filtration's largest level is not involutive. VFs in indices {c1} and {c2} fail bracket closure."
+                                    )
+                                nc = trim(coeffs, level, c1, c2)
+                        nft[c1, c2] = nc
+                        nft[c2, c1] = -nc
             self._graded_frame_torsion = nft
         return self._graded_frame_torsion
 

@@ -10,6 +10,7 @@ from ....._aux._backends._symbolic_router import (
     get_free_symbols,
     lcm_routed,
 )
+from ....._aux._backends._symbolic_router import cancel as cancel_dgcv
 from ....._aux._backends._symbolic_router import factor as factor_dgcv
 from ....._aux._vmf._safeguards import retrieve_passkey
 from ....._aux._vmf.vmf import vmf_lookup
@@ -98,21 +99,21 @@ class _tensor_field_attributes:
     def numerators(self):
         return self._compute_nd_decomp[0]
 
-    def scale_to_polynomial_attempt(self, factor=True, return_scale=False):
+    def scale_to_polynomial_attempt(self, factor=True, return_scale=False, try_hard=False):
 
         if self._denom_cm is None:
             self._denom_cm = lcm_routed(*self.denominators)
         if self._num_cd is None:
             self._num_cd = gcd_routed(*self.numerators)
+        scaled = self._denom_cm * self / self._num_cd
+        if factor:
+            try:
+                scaled = factor_dgcv(scaled, try_hard=try_hard)
+            except NotImplementedError:
+                scaled = cancel_dgcv(scaled)
         if return_scale:
-            return factor_dgcv(
-                self._denom_cm * self / self._num_cd
-            ) if factor else self._denom_cm * self / self._num_cd, self._denom_cm
-        return (
-            factor_dgcv(self._denom_cm * self / self._num_cd)
-            if factor
-            else self._denom_cm * self / self._num_cd
-        )
+            return scaled, self._denom_cm
+        return scaled
 
     @property
     def homogeneous_parts(self):

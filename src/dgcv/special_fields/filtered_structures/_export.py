@@ -9,6 +9,7 @@ from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import retrieve_passkey
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.solvers import solve_knowing_solution_exists
+from ._brackets import _sparse_row
 
 
 class _symbol_export:
@@ -66,16 +67,17 @@ class _symbol_export:
 
         def table_decomp(w1, sId1, w2, sId2, try_hard=False):
             if w1 < 0 and w2 < 0:
-                return self._decompose_in_level(
+                vec = self._decompose_in_level(
                     self.levels[w1][sId1] * self.levels[w2][sId2],
                     w1 + w2,
                     neg_positions,
                     try_hard,
                 )
+                return None if vec is None else _sparse_row(vec)
             if w2 < 0:
                 return action[(w1, sId1)][(w2, sId2)]
             if w1 < 0:
-                return [-c for c in action[(w2, sId2)][(w1, sId1)]]
+                return {r: -c for r, c in action[(w2, sId2)][(w1, sId1)].items()}
             return table_bracket.get(((w1, sId1), (w2, sId2)))
 
         def bracket_decomp(idx1, idx2, try_hard=False):
@@ -87,10 +89,9 @@ class _symbol_export:
                 if coeffVec is None:
                     return "NoSol"
                 if len(coeffVec) == 0:
-                    return [0] * dimen
-                start = [0] * complimentWeights[newWeight][0]
-                end = [0] * complimentWeights[newWeight][1]
-                return start + coeffVec + end
+                    return dict()
+                offset = complimentWeights[newWeight][0]
+                return {offset + r: c for r, c in coeffVec.items()}
             newElem = (
                 (self.levels[w1][sId1]) * (self.levels[w2][sId2])
             )  ###!!! review for ambient_rep requirements
@@ -105,7 +106,7 @@ class _symbol_export:
             )
             if nLDim == 0:
                 if is_zero_knowing_zero_is_expected(newElem):
-                    return [0] * dimen
+                    return dict()
                 else:
                     return "NoSol"
             general_elem, tVars = linear_combination(ambient_basis, _disposable=True)
@@ -119,12 +120,10 @@ class _symbol_export:
             )
             if len(sol) == 0:
                 return "NoSol"
-            coeffVec = [sol[0].get(var, var) for var in tVars]
-
-            #   newWeight should be in complimentWeights by construction
-            start = [0] * complimentWeights[newWeight][0]
-            end = [0] * complimentWeights[newWeight][1]
-            return start + coeffVec + end
+            offset = complimentWeights[newWeight][0]
+            return {
+                offset + i: sol[0].get(var, var) for i, var in enumerate(tVars)
+            }
 
         str_data = array_dgcv(
             dict(),
@@ -154,7 +153,7 @@ class _symbol_export:
                             "Unable to extract algebra structure from `Tanaka_symbol` object, "
                             + warningStr
                         )
-                new_mat = matrix_dgcv(bracket_data)
+                new_mat = matrix_dgcv(bracket_data, shape=(dimen, 1))
                 if new_mat:
                     str_data[(k, j)] = new_mat
                     str_data[(j, k)] = -new_mat
@@ -170,7 +169,7 @@ class _symbol_export:
                     i, j = SD._unspool(idx)
                     new_key = (perm[i], perm[j])
                     inner_shp = (d, 1)
-                    for k, value in enumerate(v):
+                    for k, value in v._data.items():
                         if not _scalar_is_zero(value):
                             if new_key in new_sd:
                                 new_sd[new_key][perm[k]] = value

@@ -190,7 +190,7 @@ def validate_label_list(basis_labels):
                     "family_names",
                 ),
                 ("eds", "atoms", "atomic differential forms", "family_relatives"),
-                ("eds", "coframes", "exterior differential", "family_relatives"),
+                ("eds", "coframes", "exterior differential", "children"),
             ]:
                 if system_type in variable_registry:
                     if sub_type != "" and sub_type in variable_registry[system_type]:

@@ -29,7 +29,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from ._engine import _get_sage_module, _get_sympy_module, engine_kind, engine_module
+from ._engine import (
+    _get_sage_module,
+    _get_sympy_module,
+    engine_capability,
+    engine_kind,
+    engine_module,
+)
 from ._symbolic_router import (
     _scalar_is_zero,
     as_numer_denom,
@@ -109,6 +115,9 @@ def poly_terms(
         gens_t = _stable_stamp_by_str(gens)
         monoms, coeffs = _sage_terms_via_coefficient(raw, gens_t)
         return gens_t, monoms, coeffs
+
+    if kind == "builtin":
+        return engine_capability("poly_terms")(raw, gens)
 
     raise PolyBackendError(
         "dgcv: no supported symbolic engine is available for polynomials"
@@ -223,6 +232,11 @@ def extract_polynomial_coeffs(
 def discriminant(expr, var):
     kind = engine_kind()
 
+    if kind == "builtin":
+        raise NotImplementedError(
+            "`discriminant` is not available in dgcv's builtin symbolic engine; install sympy or sage and set `default_engine` accordingly"
+        )
+
     if kind == "sympy":
         sp = _get_sympy_module()
         try:
@@ -274,8 +288,8 @@ def make_poly(
                 f"dgcv: SymPy Poly construction failed for gens={gens_t!r} and expr type {type(expr).__name__}"
             ) from e
 
-    if kind == "sage":
-        gens_t = _stable_stamp_by_str(gens)
+    if kind in ("sage", "builtin"):
+        gens_t = _stable_stamp_by_str(gens) if kind == "sage" else tuple(gens)
         raw = _normalize_poly_expr(expr, assume_polynomial=False)
         _gens_out, monoms, coeffs = poly_terms(
             raw, gens_t, assume_polynomial=True, parameters=parameters
@@ -293,6 +307,8 @@ def make_poly(
 
 
 def poly_gens(P: Any) -> Tuple[Any, ...]:
+    if isinstance(P, _DGCVPolyTerms):
+        return tuple(P.gens)
     kind = engine_kind()
 
     if kind == "sympy":
@@ -317,6 +333,8 @@ def poly_gens(P: Any) -> Tuple[Any, ...]:
 
 
 def poly_monoms(P: Any) -> List[Tuple[int, ...]]:
+    if isinstance(P, _DGCVPolyTerms):
+        return [tuple(int(e) for e in m) for m in P.monoms]
     kind = engine_kind()
 
     if kind == "sympy":
@@ -346,6 +364,8 @@ def poly_monoms(P: Any) -> List[Tuple[int, ...]]:
 
 
 def poly_coeffs(P: Any) -> List[Any]:
+    if isinstance(P, _DGCVPolyTerms):
+        return list(P.coeffs)
     kind = engine_kind()
 
     if kind == "sympy":
@@ -390,7 +410,7 @@ def poly_total_degree(
             except Exception:
                 return None
 
-    if kind == "sage":
+    if kind in ("sage", "builtin"):
         try:
             P = make_poly(expr, gens, parameters=parameters)
             monoms = poly_monoms(P)
@@ -652,6 +672,10 @@ def groebner(exprs, syms, *, process_rationals=False, **kwargs):
         from .._vmf.vmf import order_coordinates
 
         syms = order_coordinates(syms)
+        if kind == "builtin":
+            raise NotImplementedError(
+                "`groebner` is not available in dgcv's builtin symbolic engine; install sympy or sage and set `default_engine` accordingly"
+            )
         if kind == "sympy":
             sp = engine_module()
             try:
@@ -678,6 +702,10 @@ def groebner(exprs, syms, *, process_rationals=False, **kwargs):
                 raise PolyBackendError(
                     "dgcv: Sage Groebner basis computation failed"
                 ) from e
+    except NotImplementedError:
+        if fail_quietly:
+            return list(set(exprs))
+        raise
     except Exception:
         if fail_quietly:
             return list(set(exprs))
@@ -725,6 +753,18 @@ def expr_union_primitives(exprs, syms=None, *, process_rationals=False, **kwargs
                 unprocessable.append(expr)
                 continue
         try:
+            primitive_factors = engine_capability("primitive_factors")
+            if primitive_factors is not None:
+                builtin_factors = primitive_factors(expr)
+                if builtin_factors is not None:
+                    factors = []
+                    for f in builtin_factors:
+                        free = get_free_symbols(f)
+                        if free and (syms_set is None or free & syms_set):
+                            factors.append(f)
+                    if factors:
+                        processable.extend(factors)
+                    continue
             factored = factor_routed(expr)
             factors = []
             for f0 in _ordered_factors(factored):

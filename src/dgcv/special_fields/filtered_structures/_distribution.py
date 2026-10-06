@@ -4,7 +4,7 @@ import numbers
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from ..._aux._backends._numeric_router import zeroish
+from ..._aux._backends._numeric_router import rational_sample
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     conjugate,
@@ -12,7 +12,7 @@ from ..._aux._backends._symbolic_router import (
     simplify,
     subs,
 )
-from ..._aux._backends._types_and_constants import rational, symbol
+from ..._aux._backends._types_and_constants import exact_fraction, rational, symbol
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import (
@@ -23,6 +23,7 @@ from ..._aux._vmf._safeguards import (
 )
 from ..._aux._vmf.vmf import order_coordinates
 from ...algebras import algebra_class, createAlgebra
+from ...algebras.threads.util import _span_solver
 from ...core.base import dgcv_class
 from ...core.conversions.conversions import allToReal, allToSym, symToHol
 from ...core.dgcv_core import tensor_field_class, wedge
@@ -33,6 +34,183 @@ from ...core.vector_fields_and_differential_forms import (
     annihilator,
     decompose,
 )
+
+
+class _flag_span:
+    def __init__(self, basis, coordinates, use_numeric, point=None):
+        self.coordinates = tuple(coordinates)
+        self.use_numeric = use_numeric
+        self.basis = []
+        self.divisors = []
+        self._rank_cap = len(self.coordinates)
+        self._fixed = point is not None
+        self.point = point
+        self._reset_point()
+        for vf in basis:
+            self.independent(vf)
+
+    def _reset_point(self):
+        for _ in range(1 if self._fixed else 8):
+            if not self._fixed:
+                self.point = {var: rational_sample() for var in self.coordinates}
+            self.num = None
+            self._num_ok = True
+            self._num_images = []
+            self._images = []
+            self._subsets = {}
+            images = [self._image(vf) for vf in self.basis]
+            if any(image is None for image in images):
+                self._pole()
+                continue
+            if all(self._numeric_insert(image) for image in images):
+                return
+
+    def _pole(self):
+        if self._fixed:
+            raise ValueError(
+                "the distribution's coefficients have a pole at the given point."
+            )
+
+    def _image(self, vf):
+        try:
+            image = {k: subs(v, self.point) for k, v in vf.coeff_dict.items()}
+        except ZeroDivisionError:
+            return None
+        except ValueError as err:
+            if "division by zero" not in str(err):
+                raise
+            return None
+        for v in image.values():
+            if exact_fraction(v) is None and (
+                getattr(v, "is_finite", None) is False or str(v) == "nan"
+            ):
+                return None
+        return image
+
+    @staticmethod
+    def _symbolic(vf):
+        return {k: v for k, v in vf.coeff_dict.items() if not _scalar_is_zero(v)}
+
+    def _numeric_insert(self, image):
+        if not self._num_ok:
+            return True
+        if all(_scalar_is_zero(v) for v in image.values()):
+            return False
+        symbolic = any(exact_fraction(v) is None for v in image.values())
+        if self.num is None:
+            solver = _span_solver.build_from_vectors([image], force_symbolic=symbolic)
+            if solver is None:
+                self._num_ok = False
+                return True
+            self.num = solver
+            self._num_images = [image]
+            return True
+        res = self.num.insert_vector(image)
+        if res is None and self.num.numeric:
+            solver = _span_solver.build_from_vectors(
+                self._num_images, force_symbolic=True
+            )
+            if solver is not None:
+                self.num = solver
+                res = self.num.insert_vector(image)
+        if res is None:
+            self._num_ok = False
+            return True
+        if res:
+            self._num_images.append(image)
+        return res
+
+    def _numeric_verdict(self, vf):
+        image = self._image(vf)
+        for _ in range(8):
+            if image is not None:
+                break
+            self._pole()
+            self._reset_point()
+            image = self._image(vf)
+        else:
+            raise ValueError(
+                "the distribution's coefficients have a pole at every sampled point."
+            )
+        if self._num_ok:
+            res = self._numeric_insert(image)
+            if self._num_ok:
+                if res:
+                    return True, None
+                coords = None if self.num is None else self.num.reduce_vector(image)
+                if coords is None:
+                    return False, None
+                return False, tuple(
+                    i for i, c in enumerate(coords) if not _scalar_is_zero(c)
+                )
+        while len(self._images) < len(self.basis):
+            self._images.append(subs(self.basis[len(self._images)], self.point))
+        probe = subs(vf, self.point)
+        if not self._images:
+            return (not probe.is_zero), ()
+        coeffs = decompose(probe, self._images, assume_basis=True)[0]
+        if len(coeffs) == 0:
+            return True, None
+        return False, tuple(i for i, c in enumerate(coeffs) if not _scalar_is_zero(c))
+
+    def _hints(self, rows):
+        if self.num is None:
+            return [None] * len(rows)
+        keys = self.num.pivot_keys()
+        return [keys[i] if i < len(keys) else None for i in rows]
+
+    def _symbolic_solver(self, rows):
+        vecs = [self._symbolic(self.basis[i]) for i in rows]
+        solver = _span_solver.build_from_vectors(
+            vecs[:1], force_symbolic=True, membership_only=True
+        )
+        if solver is None:
+            return None
+        hints = self._hints(rows)
+        for vec, hint in zip(vecs[1:], hints[1:]):
+            solver.insert_vector(vec, pivot_hint=hint)
+        self.divisors.extend(solver.divisors)
+        return solver
+
+    def _dependent_on(self, rows, vf):
+        rows = tuple(rows)
+        if not rows:
+            return vf.is_zero
+        cache = self._subsets
+        solver = cache.get(rows, False)
+        if solver is False:
+            solver = self._symbolic_solver(rows)
+            cache[rows] = solver
+        if solver is not None:
+            res = solver.in_span(self._symbolic(vf))
+            if res is not None:
+                return res
+        return bool(
+            decompose(
+                vf,
+                [self.basis[i] for i in rows],
+                assume_basis=True,
+                only_check_decomposability=True,
+            )
+        )
+
+    def independent(self, vf):
+        if len(self.basis) >= self._rank_cap:
+            return False
+        indep, support = self._numeric_verdict(vf)
+        if indep:
+            self.basis.append(vf)
+            return True
+        if self.use_numeric or self._fixed:
+            return False
+        if support is not None and len(support) < len(self.basis):
+            if self._dependent_on(support, vf):
+                return False
+        if self._dependent_on(range(len(self.basis)), vf):
+            return False
+        self.basis.append(vf)
+        self._reset_point()
+        return True
 
 
 class distribution(dgcv_class):
@@ -101,6 +279,8 @@ class distribution(dgcv_class):
             )
             self._derived_flag = None
             self._wderived_flag = None
+            self._derived_flag_divisors = None
+            self._wderived_flag_divisors = None
             return
 
         self._simplifying_preference = find_polynomial_spanners
@@ -198,6 +378,8 @@ class distribution(dgcv_class):
 
         self._derived_flag = None
         self._wderived_flag = None
+        self._derived_flag_divisors = None
+        self._wderived_flag_divisors = None
 
         if find_basis is True:
             if vfs:
@@ -386,45 +568,90 @@ class distribution(dgcv_class):
             self.spanning_vf_set + other.spanning_vf_set, extract_basis=extract_basis
         )
 
+    def _derive_flag(
+        self, weak, find_polynomial_spanners, max_iterations, use_numeric, point=None
+    ):
+        tiered_list = [list(self.vf_basis)]
+        span = _flag_span(tiered_list[0], self.coordinates, use_numeric, point)
+        for _ in range(max_iterations):
+            left = tiered_list[0] if weak else sum(tiered_list, [])
+            top = tiered_list[-1]
+            new_tier = []
+            for vf1 in left:
+                for vf2 in top:
+                    nb = LieDerivative(vf1, vf2)
+                    if nb.is_zero:
+                        continue
+                    if find_polynomial_spanners is True:
+                        nb = nb.scale_to_polynomial_attempt(factor=True)
+                    if span.independent(nb):
+                        new_tier.append(nb)
+            if not new_tier:
+                break
+            tiered_list.append(new_tier)
+        divisors = list(span.divisors)
+        if point is not None and span.num is not None:
+            divisors.extend(span.num.divisors)
+        return tiered_list, divisors
+
+    def _generic_flag_sizes(self, max_iterations):
+        if self._wderived_flag is not None:
+            return [len(level) for level in self._wderived_flag]
+        best = None
+        draws = 0
+        for _ in range(6):
+            point = {var: rational_sample() for var in self.coordinates}
+            try:
+                flag = self._derive_flag(True, False, max_iterations, True, point)[0]
+            except ValueError:
+                continue
+            sizes = [len(level) for level in flag]
+            if best is None or self._cumulative(sizes) > self._cumulative(best):
+                best = sizes
+            draws += 1
+            if draws == 2:
+                break
+        return best
+
+    @staticmethod
+    def _cumulative(sizes):
+        out = []
+        total = 0
+        for size in sizes:
+            total += size
+            out.append(total)
+        return tuple(out) + (total,) * (16 - len(out))
+
+    @staticmethod
+    def _flag_point(at):
+        if not isinstance(at, dict):
+            raise TypeError(
+                f"`at` must be a dict mapping coordinates to values; got {type(at).__name__}."
+            )
+        return at
+
     def derived_flag(
         self,
         find_polynomial_spanners=True,
         max_iterations=10,
         use_numeric_methods=False,
+        at=None,
     ):
+        if at is not None:
+            return self._derive_flag(
+                False,
+                find_polynomial_spanners,
+                max_iterations,
+                True,
+                self._flag_point(at),
+            )[0]
         use_numeric = use_numeric_methods or bool(
             get_dgcv_settings_registry().get("use_numeric_methods", False)
         )
         if self._derived_flag is None:
-            tiered_list = [list(self.vf_basis)]
-
-            def derive_extension(tieredList, obstruction=None):
-                flattenedTL = sum(tieredList, [])
-                newTeir = []
-                topLevel = tieredList[-1]
-                obstr = obstruction if obstruction else simplify(wedge(*flattenedTL))
-                for vf1 in flattenedTL:
-                    for vf2 in topLevel:
-                        nb = LieDerivative(vf1, vf2)
-                        if find_polynomial_spanners is True:
-                            nb = nb.scale_to_polynomial_attempt(factor=True)
-                        new_obs = obstr * nb if use_numeric else simplify(obstr * nb)
-                        if use_numeric:
-                            if zeroish(new_obs):
-                                continue
-                        elif _scalar_is_zero(new_obs):
-                            continue
-                        obstr = new_obs
-                        newTeir.append(nb)
-                return list(tieredList) + [newTeir], obstr
-
-            obstr = None
-            for _ in range(max_iterations):
-                tiered_list, obstr = derive_extension(tiered_list, obstr)
-                if len(tiered_list[-1]) == 0:
-                    tiered_list = tiered_list[:-1]
-                    break
-            self._derived_flag = tiered_list
+            self._derived_flag, self._derived_flag_divisors = self._derive_flag(
+                False, find_polynomial_spanners, max_iterations, use_numeric
+            )
         return self._derived_flag
 
     def weak_derived_flag(
@@ -432,41 +659,23 @@ class distribution(dgcv_class):
         find_polynomial_spanners=False,
         max_iterations=10,
         use_numeric_methods=False,
+        at=None,
     ):
+        if at is not None:
+            return self._derive_flag(
+                True,
+                find_polynomial_spanners,
+                max_iterations,
+                True,
+                self._flag_point(at),
+            )[0]
         use_numeric = use_numeric_methods or bool(
             get_dgcv_settings_registry().get("use_numeric_methods", False)
         )
         if self._wderived_flag is None:
-            tiered_list = [list(self.vf_basis)]
-
-            def derive_extension(tieredList, obstruction=None):
-                baseL = list(tieredList[0])
-                flattenedTL = sum(tieredList, [])
-                newTeir = []
-                topLevel = list(tieredList[-1])
-                obstr = obstruction if obstruction else wedge(*flattenedTL)
-                for vf1 in baseL:
-                    for vf2 in topLevel:
-                        nb = LieDerivative(vf1, vf2)
-                        if find_polynomial_spanners is True:
-                            nb = nb.scale_to_polynomial_attempt(factor=True)
-                        new_obs = obstr * nb if use_numeric else simplify(obstr * nb)
-                        if use_numeric:
-                            if zeroish(new_obs):
-                                continue
-                        elif _scalar_is_zero(new_obs):
-                            continue
-                        obstr = new_obs
-                        newTeir.append(nb)
-                return list(tieredList) + [newTeir], obstr
-
-            obstr = None
-            for _ in range(max_iterations):
-                tiered_list, obstr = derive_extension(tiered_list, obstr)
-                if len(tiered_list[-1]) == 0:
-                    tiered_list = tiered_list[:-1]
-                    break
-            self._wderived_flag = tiered_list
+            self._wderived_flag, self._wderived_flag_divisors = self._derive_flag(
+                True, find_polynomial_spanners, max_iterations, use_numeric
+            )
         return self._wderived_flag
 
     def nilpotent_approximation(
@@ -505,7 +714,15 @@ class distribution(dgcv_class):
             approximation_point = {var: 0 for var in self.coordinates}
 
         dimension = len(self.coordinates)
-        derFlag = self.weak_derived_flag(use_numeric_methods=use_numeric_methods)
+        derFlag = self.weak_derived_flag(at=approximation_point)
+        local_sizes = [len(level) for level in derFlag]
+        reference_sizes = self._generic_flag_sizes(10)
+        if reference_sizes is not None and self._cumulative(
+            local_sizes
+        ) != self._cumulative(reference_sizes):
+            dgcv_warning(
+                f"The expansion point is a growth-vector singularity: the derived flag there has tier sizes {local_sizes} against {reference_sizes} at a generic point. The nilpotent approximation returned is the graded algebra of the flag at the point."
+            )
         evaluated_flag = [
             list([subs(vf, approximation_point) for vf in level]) for level in derFlag
         ]

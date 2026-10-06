@@ -21,26 +21,50 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import numbers
+from fractions import Fraction
 
 from ._engine import (
     _get_sage_module,
     _get_sympy_module,
+    engine_capability,
     engine_kind,
+    engine_module,
     is_sage_available,
     is_sympy_available,
 )
 
 # types
 _atomic_pred = None
+_engines_seen = set()
+_foreign_engine_prefix = None
 _constant_scalar_types = None
 _expr_types = None
 _expr_numeric_types = None
 _fast_scalar_types = None
 
 
+_builtin_types_cache = None
+
+
+def _builtin_types():
+    global _builtin_types_cache
+    if _builtin_types_cache is None:
+        from ...eds._atoms import zero_form_atom
+        from ...eds._constants import _BuiltinLeaf
+        from ...eds._zero_forms import zero_form_class
+
+        _builtin_types_cache = (zero_form_class, zero_form_atom, _BuiltinLeaf)
+    return _builtin_types_cache
+
+
+def is_builtin_scalar(x):
+    return isinstance(x, _builtin_types())
+
+
 def invalidate_types_and_constants_cache():
     global \
         _atomic_pred, \
+        _foreign_engine_prefix, \
         _constant_scalar_types, \
         _expr_types, \
         _expr_numeric_types, \
@@ -56,7 +80,9 @@ def invalidate_types_and_constants_cache():
         _op_table, \
         _op_engine, \
         _sage_constant_strs
+    global _builtin_types_cache
     _atomic_pred = None
+    _foreign_engine_prefix = None
     _constant_scalar_types = None
     _expr_types = None
     _expr_numeric_types = None
@@ -96,6 +122,9 @@ def fast_scalar_types():
             types.extend([sp.Integer, sp.Rational])
         except Exception:
             pass
+
+    if engine_kind() == "builtin":
+        types.append(Fraction)
 
     _fast_scalar_types = tuple(types)
     return _fast_scalar_types
@@ -148,6 +177,9 @@ def expr_types():
         except Exception:
             pass
 
+    if engine_kind() == "builtin":
+        types.extend(_builtin_types())
+
     _expr_types = tuple(types)
     return _expr_types
 
@@ -174,6 +206,9 @@ def expr_numeric_types():
         except Exception:
             pass
 
+    if engine_kind() == "builtin":
+        types.extend(_builtin_types())
+
     _expr_numeric_types = tuple(types)
     return _expr_numeric_types
 
@@ -181,6 +216,15 @@ def expr_numeric_types():
 def atomic_predicate():
     global _atomic_pred
     if _atomic_pred is not None:
+        return _atomic_pred
+
+    if engine_kind() == "builtin":
+        from ...eds._atoms import zero_form_atom
+
+        def builtin_pred(x):
+            return isinstance(x, zero_form_atom)
+
+        _atomic_pred = builtin_pred
         return _atomic_pred
 
     sp = None
@@ -302,8 +346,57 @@ def _get_op_table():
     return _op_table
 
 
+def _builtin_op_expr(expr):
+    from ...eds._atoms import zero_form_atom
+    from ...eds._constants import _BuiltinLeaf
+    from ...eds._zero_forms import zero_form_class
+
+    if isinstance(expr, zero_form_class):
+        base = expr.base
+        if isinstance(base, tuple):
+            return {
+                "add": OP_ADD,
+                "sub": OP_ADD,
+                "mul": OP_MUL,
+                "div": OP_MUL,
+                "pow": OP_POW,
+            }.get(base[0], OP_FUNCTION)
+        return _builtin_op_expr(base)
+    if isinstance(expr, zero_form_atom):
+        return OP_SYMBOL
+    if getattr(expr, "_compound", False):
+        return OP_FUNCTION
+    if isinstance(expr, _BuiltinLeaf):
+        return OP_CONSTANT
+    if isinstance(expr, numbers.Number) and not isinstance(expr, bool):
+        return OP_NUMBER
+    return None
+
+
+def _builtin_expr_operands(expr):
+    from ...eds._zero_forms import zero_form_class
+
+    if getattr(expr, "_compound", False):
+        expr = zero_form_class(expr)
+    if not isinstance(expr, zero_form_class):
+        return ()
+    wrap = lambda a: a if isinstance(a, numbers.Number) else zero_form_class(a)  # noqa: E731
+    if getattr(expr.base, "_compound", False):
+        return tuple(wrap(a) for a in expr.base.args)
+    if not isinstance(expr.base, tuple):
+        return ()
+    op, *args = expr.base
+    if op == "sub":
+        return (wrap(args[0]), zero_form_class(("mul", -1, args[1])))
+    if op == "div":
+        return (wrap(args[0]), zero_form_class(("pow", args[1], -1)))
+    return tuple(wrap(a) for a in args)
+
+
 def op_expr(expr):
     kind = engine_kind()
+    if kind == "builtin":
+        return _builtin_op_expr(expr)
     table = _get_op_table()
 
     if kind == "sympy":
@@ -389,6 +482,9 @@ def expr_operands(expr):
 
     kind = engine_kind()
 
+    if kind == "builtin":
+        return _builtin_expr_operands(expr)
+
     if kind == "sage":
         f = getattr(expr, "operands", None)
         if callable(f):
@@ -465,7 +561,7 @@ def symbol(name, assumptions=None):
             return v(nm, domain="real")
         return v(nm, domain="complex")
 
-    return str(name)
+    return engine_module().symbol(name, assumptions)
 
 
 def _disposable_symbol(name):
@@ -477,7 +573,7 @@ def _disposable_symbol(name):
     if kind == "sage":
         return _get_sage_module().var(str(name))
 
-    return str(name)
+    return engine_module().symbol(name)
 
 
 def _disposable_symbols(prefix, count, start=0):
@@ -527,7 +623,9 @@ def imag_unit():
         _I_obj = _get_sympy_module().I
         return _I_obj
 
-    _I_obj = 1j
+    from ...eds._constants import I
+
+    _I_obj = I
     return _I_obj
 
 
@@ -554,9 +652,9 @@ def e_constant():
         _e_obj = _get_sympy_module().E
         return _e_obj
 
-    import math
+    from ...eds._constants import E
 
-    _e_obj = math.e
+    _e_obj = E
     return _e_obj
 
 
@@ -570,7 +668,114 @@ def integer(n):
     return n
 
 
+def note_engine(kind):
+    if kind:
+        _engines_seen.add(kind)
+
+
+def engines_seen():
+    return frozenset(_engines_seen)
+
+
+def _foreign_prefix():
+    global _foreign_engine_prefix
+    if _foreign_engine_prefix is None:
+        from .._utilities._config import get_dgcv_settings_registry
+
+        if get_dgcv_settings_registry().get("forgo_CAS_provenance_pruning", False):
+            _foreign_engine_prefix = ""
+        else:
+            kind = engine_kind()
+            note_engine(kind)
+            if kind == "sympy":
+                _foreign_engine_prefix = "sage" if is_sage_available() else ""
+            elif kind == "sage":
+                _foreign_engine_prefix = "sympy" if "sympy" in _engines_seen else ""
+            elif kind == "builtin":
+                prefixes = []
+                if is_sympy_available():
+                    prefixes.append("sympy")
+                if is_sage_available():
+                    prefixes.append("sage")
+                _foreign_engine_prefix = tuple(prefixes)
+            else:
+                _foreign_engine_prefix = ""
+    return _foreign_engine_prefix
+
+
+def _lower_builtin_constant(x, kind):
+    label = str(x)
+    if label == "I":
+        return imag_unit()
+    if label == "e":
+        return e_constant()
+    if label == "pi":
+        return _get_sympy_module().pi if kind == "sympy" else _get_sage_module().pi
+    return x
+
+
+def as_fraction(v):
+    if isinstance(v, Fraction):
+        return v
+    if isinstance(v, bool):
+        return Fraction(int(v))
+    if isinstance(v, numbers.Integral):
+        return Fraction(int(v))
+    if isinstance(v, numbers.Rational):
+        num = v.numerator
+        den = v.denominator
+        if callable(num):
+            num = num()
+        if callable(den):
+            den = den()
+        return Fraction(int(num), int(den))
+    return Fraction(v)
+
+
+def exact_fraction(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Fraction(value)
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, numbers.Rational):
+        try:
+            return Fraction(int(value.numerator), int(value.denominator))
+        except Exception:
+            return None
+    num = getattr(value, "numerator", None)
+    den = getattr(value, "denominator", None)
+    if callable(num) and callable(den):
+        try:
+            return Fraction(int(num()), int(den()))
+        except Exception:
+            return None
+    return None
+
+
+def to_active_engine(x):
+    if getattr(x, "_builtin_constant", False):
+        kind = engine_kind()
+        if kind in ("sympy", "sage"):
+            return _lower_builtin_constant(x, kind)
+        return x
+    prefix = _foreign_prefix()
+    if not prefix or not type(x).__module__.startswith(prefix):
+        return x
+    if isinstance(prefix, tuple):
+        return engine_capability("from_foreign")(x)
+    convert = getattr(x, "_sympy_" if prefix == "sage" else "_sage_", None)
+    if convert is None:
+        return x
+    try:
+        return convert()
+    except Exception:
+        return x
+
+
 def as_engine_scalar(x):
+    x = to_active_engine(x)
     if isinstance(x, bool) or not isinstance(x, numbers.Number):
         return x
     if isinstance(x, numbers.Integral):
@@ -626,9 +831,8 @@ def rational(p, q=1):
         return sage.Integer(p) / sage.Integer(q)
     if kind == "sympy":
         return _get_sympy_module().Rational(p, q)
-    from fractions import Fraction
 
-    return Fraction(p, q)
+    return as_fraction(p) / as_fraction(q)
 
 
 _sympy_conj_head = None
@@ -655,6 +859,9 @@ def _get_sympy_conj_head():
 
 def verify_conjugates_free(expr) -> bool:
     kind = engine_kind()
+
+    if kind == "builtin":
+        return isinstance(expr, numbers.Number) or is_builtin_scalar(expr)
 
     if kind == "sympy":
         h = getattr(expr, "has", None)
@@ -775,6 +982,9 @@ def verify_conjugate_re_im_free(expr) -> bool:
     in the active symbolic engine.
     """
     kind = engine_kind()
+
+    if kind == "builtin":
+        return isinstance(expr, numbers.Number) or is_builtin_scalar(expr)
 
     if kind == "sympy":
         h = getattr(expr, "has", None)

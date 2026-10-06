@@ -109,12 +109,7 @@ def exteriorProduct(*args):
 
 def wedge(*tfs):
     types = {get_dgcv_category(tf) for tf in tfs if not check_dgcv_scalar(tf)}
-    acceptables = {
-        "algebra_element",
-        "subalgebra_element",
-        "vector_space_element",
-        "tensorProduct",
-    }
+    acceptables = {"algebra_element", "subalgebra_element", "tensorProduct"}
     if types != {"tensor_field"} and not all(
         dgcv_type in acceptables for dgcv_type in types
     ):
@@ -146,7 +141,6 @@ def symmetric_product(*tfs):
     acceptables = {
         "algebra_element",
         "subalgebra_element",
-        "vector_space_element",
         "tensorProduct",
     }
     if types != {"tensor_field"} and not all(

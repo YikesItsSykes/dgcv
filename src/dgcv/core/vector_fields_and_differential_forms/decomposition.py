@@ -31,6 +31,166 @@ def _extract_basis_over_function_ring(objs, dimension_hint=None):
         )
 
 
+_prepared_spans = {}
+_prepared_limit = 64
+_format_classes = {"complex": "complex", "real": "real"}
+
+
+def _coeff_vector(obj):
+    cd = getattr(obj, "coeff_dict", None)
+    if not isinstance(cd, dict):
+        return None
+    return cd
+
+
+def _span_signature(obj):
+    return (
+        getattr(obj, "_span_class", type(obj)),
+        getattr(obj, "data_shape", None),
+        id(getattr(obj, "algebra", None)),
+    )
+
+
+def _format_class(obj):
+    return _format_classes.get(getattr(obj, "_validated_format", None))
+
+
+def _prepared_entry(objs, to_vector):
+    from ..._aux._backends._engine import engine_kind
+    from ...algebras.threads.util import _span_solver
+
+    objs = list(objs)
+    if not objs:
+        return None
+    key = (engine_kind(), tuple(id(o) for o in objs))
+    hit = _prepared_spans.get(key)
+    if hit is not None:
+        return hit[1]
+    if len(_prepared_spans) >= _prepared_limit:
+        _prepared_spans.clear()
+    entry = None
+    sig = _span_signature(objs[0])
+    fmt = None
+    vectors = []
+    for o in objs:
+        if _span_signature(o) != sig:
+            break
+        f = _format_class(o)
+        if f is not None:
+            if fmt is None:
+                fmt = f
+            elif f != fmt:
+                break
+        vec = to_vector(o)
+        if vec is None:
+            break
+        vectors.append(vec)
+    else:
+        solver = _span_solver.build_from_vectors(vectors)
+        if solver is not None:
+            entry = (solver, sig, fmt)
+    _prepared_spans[key] = (objs, entry)
+    return entry
+
+
+def _prepared_span(objs, to_vector=_coeff_vector):
+    entry = _prepared_entry(objs, to_vector)
+    return None if entry is None else entry[0]
+
+
+def _prepared_prefix_spans(objs, cuts, to_vector=_coeff_vector):
+    from ..._aux._backends._engine import engine_kind
+    from ...algebras.threads.util import _span_solver
+
+    objs = list(objs)
+    cuts = sorted({c for c in cuts if 0 < c <= len(objs)})
+    if not objs or not cuts:
+        return None
+    kind = engine_kind()
+    keys = [(kind, tuple(id(o) for o in objs[:cut])) for cut in cuts]
+    if all(_prepared_spans.get(key) is not None for key in keys):
+        return [_prepared_spans[key][1] for key in keys]
+    sig = _span_signature(objs[0])
+    fmt = None
+    vectors = []
+    for o in objs[: cuts[-1]]:
+        if _span_signature(o) != sig:
+            return None
+        f = _format_class(o)
+        if f is not None:
+            if fmt is None:
+                fmt = f
+            elif f != fmt:
+                return None
+        vec = to_vector(o)
+        if vec is None:
+            return None
+        vectors.append(vec)
+    solvers = _span_solver.build_prefixes(vectors, cuts)
+    if solvers is None:
+        return None
+    if len(_prepared_spans) + len(cuts) > _prepared_limit:
+        _prepared_spans.clear()
+    entries = []
+    for key, cut, solver in zip(keys, cuts, solvers):
+        entry = (solver, sig, fmt)
+        _prepared_spans[key] = (objs[:cut], entry)
+        entries.append(entry)
+    return entries
+
+
+def _decompose_prepared(obj, basis, wanted=None):
+    entry = _prepared_entry(basis, _coeff_vector)
+    if entry is None:
+        return None
+    solver, sig, fmt = entry
+    if _span_signature(obj) != sig:
+        return None
+    f = _format_class(obj)
+    if f is not None and fmt is not None and f != fmt:
+        return None
+    vec = _coeff_vector(obj)
+    if vec is None:
+        return None
+    return solver.reduce_vector(vec, wanted)
+
+
+def _decompose_constrained_prepared(obj, basis, constrained):
+    from ..._aux._backends._engine import engine_capability
+
+    if engine_capability("span_field") is None:
+        return None
+    entry = _prepared_entry(basis, _coeff_vector)
+    if entry is None:
+        return None
+    solver, sig, fmt = entry
+    if _span_signature(obj) != sig:
+        return None
+    f = _format_class(obj)
+    if f is not None and fmt is not None and f != fmt:
+        return None
+    vec = _coeff_vector(obj)
+    if vec is None:
+        return None
+    reduced = solver.reduce_vector_residual(vec)
+    if reduced is None:
+        return None
+    coords, residual = reduced
+    eqns = [e for e in residual if not _scalar_is_zero(e)]
+    if eqns:
+        solutions = solve_dgcv(
+            eqns, list(constrained), method="linsolve", simplify_result=False
+        )
+        if not solutions:
+            return None
+        sol0 = solutions[0]
+    else:
+        sol0 = {}
+    if sol0:
+        coords = [subs(c, sol0) for c in coords]
+    return (coords, list(basis), {v: sol0.get(v, v) for v in constrained})
+
+
 def decompose(
     obj,
     basis,
@@ -45,6 +205,8 @@ def decompose(
     assume_basis: bool = False,
     register_parameters: bool = False,
     _no_disposable_solve_vars: bool = False,
+    _generic_combination=None,
+    _coordinate_indices=None,
 ):
     """
     Decomposes a vector field or differential form as a linear combination of a given `basis` list.
@@ -144,15 +306,40 @@ def decompose(
                     return [], basis, sol
             return bool(eqns) and all(_scalar_is_zero(e) for e in eqns)
         return ([], basis)
+    if (
+        assume_basis
+        and not return_parameters
+        and not variables_to_constrain
+        and not _no_disposable_solve_vars
+    ):
+        prepared = _decompose_prepared(obj, basis, _coordinate_indices)
+        if prepared is not None:
+            if only_check_decomposability is True:
+                return True
+            return (prepared, basis)
+    if (
+        assume_basis
+        and assume_VTC_linear
+        and variables_to_constrain
+        and not return_parameters
+        and not only_check_decomposability
+        and not _no_disposable_solve_vars
+    ):
+        prepared = _decompose_constrained_prepared(obj, basis, variables_to_constrain)
+        if prepared is not None:
+            return prepared
     use_disposable_solve_vars = (
         assume_basis
         and not return_parameters
         and not variables_to_constrain
         and not _no_disposable_solve_vars
     )
-    gen_combo, variables = linear_combination(
-        basis, _disposable=use_disposable_solve_vars
-    )
+    if use_disposable_solve_vars and _generic_combination is not None:
+        gen_combo, variables = _generic_combination
+    else:
+        gen_combo, variables = linear_combination(
+            basis, _disposable=use_disposable_solve_vars
+        )
     if variables_to_constrain:
         variables = list(variables) + list(variables_to_constrain)
     system = obj - gen_combo

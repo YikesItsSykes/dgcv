@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import cmath
 from math import gcd
-from random import getrandbits, randint, random
+from random import getrandbits, randint
 from typing import Any, Optional
 
 from .._vmf._safeguards import create_key
@@ -21,12 +20,11 @@ def zeroish(
     **kwargs,
 ) -> bool:
     dgcv_hook = getattr(x, "__dgcv_zero_obstr__", None)
-    zero_check = cmath.isclose
     if dgcv_hook:
         obstructions, variables = dgcv_hook
-        ev_point = {var: random() for var in variables}
+        ev_point = {var: rational_sample() for var in variables}
         for expr in obstructions:
-            if not zero_check(subs(expr, ev_point), 0, abs_tol=1e-9):
+            if not _scalar_is_zero(subs(expr, ev_point)):
                 return False
         return True
     return _scalar_is_zero(x)

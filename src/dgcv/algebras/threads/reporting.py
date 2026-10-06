@@ -26,6 +26,42 @@ from .report_components import (
 )
 
 
+_MAX_BASIS_COLUMNS = 24
+_MAX_LIST_ITEMS = 12
+_LIST_NODE_BUDGET = 250
+_ELISION_NOTE = (
+    "Some large output was elided from this report. "
+    "Pass `elide_large_output=False` to `summary` to show everything."
+)
+
+
+def _element_size(elem, max_nodes):
+    coeffs = getattr(elem, "coeff_dict", None)
+    if not isinstance(coeffs, dict):
+        return fast_printable(elem, max_nodes=max_nodes, return_count=True)
+    total = 0
+    for c in coeffs.values():
+        total += fast_printable(
+            c, max_nodes=max(max_nodes - total, 0), return_count=True
+        )
+        if total > max_nodes:
+            break
+    return total
+
+
+def _elide_items(items, sized=False):
+    items = list(items)
+    budget = _LIST_NODE_BUDGET
+    shown = []
+    for item in items[:_MAX_LIST_ITEMS]:
+        if sized:
+            budget -= _element_size(item, budget)
+            if budget < 0:
+                break
+        shown.append(item)
+    return shown, len(items) - len(shown)
+
+
 def _summary_render_plain(
     parentAlg,
     refAlg,
@@ -34,7 +70,9 @@ def _summary_render_plain(
     algebra_name: str,
     algebra_name_cap: str,
     show_singularities: bool | None = None,
+    elide_large_output: bool = True,
 ) -> str:
+    max_items = 12 if elide_large_output else 10**9
     nm = _alg_name_plain(parentAlg)
     alg_dim = getattr(refAlg, "dimension", None)
 
@@ -55,9 +93,9 @@ def _summary_render_plain(
 
     basis = getattr(refAlg, "basis", ()) or ()
     lines.append("Basis and grading:")
-    lines.append(f"  - basis: {_fmt_angle_list(basis, max_items=12)}")
+    lines.append(f"  - basis: {_fmt_angle_list(basis, max_items=max_items)}")
     grad = getattr(refAlg, "grading", None)
-    lines.append(f"  - grading: {_fmt_grading_plain(grad, max_items=12)}")
+    lines.append(f"  - grading: {_fmt_grading_plain(grad, max_items=max_items)}")
     if isinstance(grad, (list, tuple)):
         for gi, g in enumerate(grad, start=1):
             if not isinstance(g, (list, tuple)) or len(g) != len(basis):
@@ -68,7 +106,7 @@ def _summary_render_plain(
         cbasis = getattr(center, "basis", ()) or ()
         lines.append("Center:")
         lines.append(f"  - dimension: {getattr(center, 'dimension', None)}")
-        lines.append(f"  - basis: {_fmt_angle_list(cbasis, max_items=12)}")
+        lines.append(f"  - basis: {_fmt_angle_list(cbasis, max_items=max_items)}")
 
     ld = getattr(refAlg, "_Levi_deco_cache", None)
     if getattr(refAlg, "_lie_algebra_cache", None) is True and isinstance(ld, dict):
@@ -96,7 +134,7 @@ def _summary_render_plain(
             ibasis = getattr(alg, "basis", ()) or ()
             if ibasis:
                 out.append(
-                    f"{indent}    basis: {_fmt_angle_list(ibasis, max_items=12)}"
+                    f"{indent}    basis: {_fmt_angle_list(ibasis, max_items=max_items)}"
                 )
             return out
 
@@ -154,7 +192,7 @@ def _summary_render_plain(
             if Levi_component is not None:
                 lines.append(
                     "          basis: "
-                    f"{_fmt_angle_list(getattr(Levi_component, 'basis', ()) or (), max_items=12)}"
+                    f"{_fmt_angle_list(getattr(Levi_component, 'basis', ()) or (), max_items=max_items)}"
                 )
             lines.append(
                 f"      - max. solvable ideal: {rad_dim} dimensional, {_radical_kind(rad)}"
@@ -164,7 +202,7 @@ def _summary_render_plain(
             if rad is not None:
                 lines.append(
                     "          basis: "
-                    f"{_fmt_angle_list(getattr(rad, 'basis', ()) or (), max_items=12)}"
+                    f"{_fmt_angle_list(getattr(rad, 'basis', ()) or (), max_items=max_items)}"
                 )
 
         if (
@@ -203,7 +241,7 @@ def _summary_render_plain(
                     else:
                         lines.append(
                             f"  - Level {idx}: dimension {_level_dim(elems)}, "
-                            f"{_fmt_angle_list(elems, max_items=12)}"
+                            f"{_fmt_angle_list(elems, max_items=max_items)}"
                         )
 
     if show_singularities is not False and getattr(refAlg, "_singularities", False):
@@ -253,8 +291,10 @@ def _summary_render_rich(
     extra_support_for_math_in_tables: bool,
     show_singularities: bool | None = None,
     full=False,
+    elide_large_output: bool = True,
 ):
     theme_vars, theme_data = get_style(style, return_theme_data=True)
+    elided = False
     border_radius = int(
         theme_data.custom_css_vars.get("--dgcv-border-radius", "12px").replace("px", "")
     )
@@ -292,6 +332,7 @@ def _summary_render_rich(
             {scoped_theme}
             #{container_id} .stack {{ display: flex; flex-direction: column; gap: 16px; align-items: stretch; width: 100%; margin: 0; }}
             #{container_id} .section {{ width: 100%; }}
+            #{container_id} .dgcv-data-table th.row_heading {{ position: sticky; left: 0; z-index: 1; white-space: nowrap; }}
             #{container_id} .dgcv-panel {{
                 background: {panel_bg};
                 box-shadow: var(--dgcv-table-shadow, none);
@@ -359,9 +400,19 @@ def _summary_render_rich(
             return _scalar_is_zero(z)
         return False
 
+    def _omitted_tok(omitted, any_shown=True):
+        nonlocal elided
+        elided = True
+        if any_shown:
+            return f"… (+{omitted} more)"
+        return f"{omitted} large element{'s' if omitted != 1 else ''} omitted"
+
     def _fmt_basis_list(elems):
         if _is_trivial_level(elems):
             return empty_tok
+        omitted = 0
+        if elide_large_output:
+            elems, omitted = _elide_items(elems, sized=True)
         if use_latex:
             out = []
             for elem in elems:
@@ -369,19 +420,29 @@ def _summary_render_rich(
                     out.append(f"${elem._repr_latex_(raw=True)}$")
                 except Exception:
                     out.append(repr(elem))
-            return ", ".join(out)
-        return ", ".join(repr(elem) for elem in elems)
+        else:
+            out = [repr(elem) for elem in elems]
+        if omitted:
+            out.append(_omitted_tok(omitted, bool(out)))
+        return ", ".join(out)
 
     params_check = list(getattr(refAlg, "_parameters", []))
+    params_omitted = 0
+    if elide_large_output:
+        params_shown, params_omitted = _elide_items(params_check)
+    else:
+        params_shown = params_check
     if use_latex:
         try:
             from ..._aux.printing.printing._dgcv_display import LaTeX_list
 
-            params = LaTeX_list(params_check, math_mode="$")
+            params = LaTeX_list(params_shown, math_mode="$")
         except Exception:
-            params = [repr(b) for b in params_check]
+            params = [repr(b) for b in params_shown]
     else:
-        params = [repr(b) for b in params_check]
+        params = [repr(b) for b in params_shown]
+    if params_omitted:
+        params = f"{params} {_omitted_tok(params_omitted)}"
 
     dimension_item = _dimension_item(refAlg, use_latex)
     if params:
@@ -450,6 +511,9 @@ def _summary_render_rich(
         )
 
     basis_elems = getattr(refAlg, "basis", ()) or ()
+    n_basis = len(basis_elems)
+    n_columns = min(n_basis, _MAX_BASIS_COLUMNS) if elide_large_output else n_basis
+    basis_elems = list(basis_elems)[:n_columns]
     if use_latex:
         try:
             basis_labels = [f"${b._repr_latex_(raw=True)}$" for b in basis_elems]
@@ -481,18 +545,23 @@ def _summary_render_rich(
 
     if isinstance(grad, (list, tuple)) and grad:
         for gi, g in enumerate(grad, start=1):
-            if isinstance(g, (list, tuple)) and len(g) == len(basis_labels):
-                rows.append([_fmt_weight(x) for x in g])
+            if isinstance(g, (list, tuple)) and len(g) == n_basis:
+                rows.append([_fmt_weight(x) for x in g[:n_columns]])
                 grad_index_labels.append(f"Grading {gi}")
             else:
                 warn_msgs.append(f"grading {gi} invalid or length mismatch")
 
+    if n_columns < n_basis:
+        elided = True
+        for row in rows:
+            row.append("⋯")
+        warn_msgs.append(f"showing the first {n_columns} of {n_basis} basis elements")
     footer_rows = (
         [
             [
                 {
                     "html": f"<em>{_esc(' | '.join(warn_msgs))}</em>",
-                    "attrs": {"colspan": len(basis_labels)},
+                    "attrs": {"colspan": len(rows[0])},
                 }
             ]
         ]
@@ -562,7 +631,11 @@ def _summary_render_rich(
         def _center_panel(corner_kwargs):
             IT = []
             center = getattr(refAlg, "_center_cache", None)
-            PT = center._repr_latex_(raw=False, verbose=True)
+            center_basis = list(getattr(center, "basis", ()) or ())
+            if elide_large_output and _elide_items(center_basis, sized=True)[1]:
+                PT = f"Dimension {len(center_basis)}, spanned by {_fmt_basis_list(center_basis)}"
+            else:
+                PT = center._repr_latex_(raw=False, verbose=True)
             return panel_view(
                 header="Center",
                 primary_text=PT,
@@ -690,12 +763,19 @@ def _summary_render_rich(
                             if subAlg
                             else f"{algebra_name_cap} is a direct sum"
                         )
-                    for a in simples:
+                    shown, omitted = (
+                        _elide_items(simples)
+                        if elide_large_output
+                        else (list(simples), 0)
+                    )
+                    for a in shown:
                         IT.append(
                             f"${a._repr_latex_(raw=True, abbrev=True)}$"
                             if use_latex
                             else repr(a)
                         )
+                    if omitted:
+                        IT.append(_omitted_tok(omitted))
             else:
                 PT = (
                     "The subalgebra is a semidirect sum"
@@ -916,10 +996,14 @@ def _summary_render_rich(
 
         sections.append(("singularities", singularities_panel))
 
-    built_blocks = [
+    built_blocks = [None] + [
         builder(_corners_for(i, len(sections)))
         for i, (_, builder) in enumerate(sections)
+        if i > 0
     ]
+    if elided:
+        items.append(_ELISION_NOTE)
+    built_blocks[0] = sections[0][1](_corners_for(0, len(sections)))
     return latex_in_html(
         _HTMLWrapper(_stack_many(built_blocks)),
         extra_support_for_math_in_tables=extra_support_for_math_in_tables,

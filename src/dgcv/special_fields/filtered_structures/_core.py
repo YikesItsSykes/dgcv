@@ -3,7 +3,12 @@ from __future__ import annotations
 import numbers
 from collections.abc import Iterable
 
-from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols
+from ..._aux._backends._polynomials import expr_union_primitives
+from ..._aux._backends._symbolic_router import (
+    _scalar_is_zero,
+    as_numer_denom,
+    get_free_symbols,
+)
 from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
@@ -14,6 +19,7 @@ from ...algebras import (
     subalgebra_class,
 )
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
+from ...core.vector_fields_and_differential_forms.decomposition import decompose
 from ._ds import _DS_component, _DS_realign, _DS_record, _DS_weight_list
 from ._formatting import (
     _GAE_to_hom_formatting,
@@ -22,6 +28,13 @@ from ._formatting import (
 )
 from ._tensor_products import _fast_tensor_products
 
+
+
+def _one_hot_first(candidate):
+    elem = candidate[2]
+    cd = getattr(elem, "coeff_dict", None)
+    values = cd.values() if isinstance(cd, dict) else elem.coeffs
+    return 0 if sum(1 for x in values if not _scalar_is_zero(x)) == 1 else 1
 
 class _symbol_core:
     def __init__(
@@ -35,7 +48,8 @@ class _symbol_core:
         assume_linear_independence=False,
         assume_NNP_linear_indep=False,
         index_threshold=None,
-        precompute_generators=False,
+        precompute_generators=True,
+        compress_equation_systems=None,
         _validated=None,
         _internal_parameters=set(),
         _internal_singularities=None,
@@ -492,7 +506,12 @@ class _symbol_core:
             maxDSW = max(maxDSW, max(hi for _, hi in record.components))
             record.cap = max(self.height, max(hi for _, hi in record.components))
         self._default_to_characteristic_space_reductions = maxDSW >= 0
-        if precompute_generators is True:
+        self._compress_equation_systems = (
+            precompute_generators is True and len(self._parameters) == 0
+            if compress_equation_systems is None
+            else compress_equation_systems is True
+        )
+        if precompute_generators is True or self._compress_equation_systems:
             _ = self.GLA_generators
 
     @property
@@ -511,21 +530,32 @@ class _symbol_core:
                 remaining_comm = [(j, k, j * k) for j in f_level for k in deeper_levels]
                 self._test_commutators = first_commutators + remaining_comm
             elif self._GLA_generators is not None:
-                first_commutators = sum(self._GLA_generators["triples"].values(), [])
-                remaining_comm = [
-                    (j, k, j * k)
-                    for j in sum(self._GLA_generators["generators"].values(), [])
-                    for k in self._GLA_generators["generated"]
-                ]
-                self._test_commutators = first_commutators + remaining_comm
+                generators = sum(self._GLA_generators["generators"].values(), [])
+                gen_position = {id(g): n for n, g in enumerate(generators)}
+                neg_basis = sum([list(j) for j in (self.GLA_levels).values()], [])
+                commutators = []
+                for n, g in enumerate(generators):
+                    for b in neg_basis:
+                        position = gen_position.get(id(b))
+                        if position is not None and position <= n:
+                            continue
+                        commutators.append((g, b, g * b))
+                self._test_commutators = commutators
             else:
-                neg_levels = sum([list(j) for j in (self.GLA_levels).values()], [])
-                self._test_commutators = [
-                    (neg_levels[j], neg_levels[k], neg_levels[j] * neg_levels[k])
-                    for j in range(len(neg_levels))
-                    for k in range(j + 1, len(neg_levels))
-                ]
+                self._test_commutators = self._pairwise_test_commutators()
         return self._test_commutators
+
+    def _pairwise_test_commutators(self):
+        cached = getattr(self, "_test_commutators_full", None)
+        if cached is None:
+            neg_levels = sum([list(j) for j in (self.GLA_levels).values()], [])
+            cached = [
+                (neg_levels[j], neg_levels[k], neg_levels[j] * neg_levels[k])
+                for j in range(len(neg_levels))
+                for k in range(j + 1, len(neg_levels))
+            ]
+            self._test_commutators_full = cached
+        return cached
 
     @property
     def GLA_generators(self):
@@ -534,6 +564,7 @@ class _symbol_core:
             self._GLA_generators = {"generators": {-1: self.levels[-1]}}
             self._GLA_generators["map"] = {-1: [(j, j, 1) for j in self.levels[-1]]}
             self._GLA_generators["triples"] = dict()
+            elem_weight = {id(j): -1 for j in self.levels[-1]}
             nRange = range(-1, min(self.negWeights) - 1, -1)
             generated = []
             for w in nRange[1:]:
@@ -541,6 +572,7 @@ class _symbol_core:
                 w_level_brackets = []
                 w_level_triples = []
                 brackets = self.ambientGLA.subspace()
+                candidates = []
                 for idx1 in range(-1, w // 2 - 1, -1):
                     idx2 = w - idx1
                     for c1, eT1 in enumerate(self._GLA_generators["map"].get(idx1, [])):
@@ -549,17 +581,22 @@ class _symbol_core:
                             tuple1, e1, dep1 = eT1
                             tuple2, e2, dep2 = eT2
                             dep3 = max(dep1, dep2) + 1
-                            d1 = brackets.dimension
                             eProd = e1 * e2
-                            brackets.append(eProd)
+                            elem_weight[id(eProd)] = w
                             if dep3 == 2:
                                 w_level_triples.append((tuple1, tuple2, eProd))
-                            if brackets.dimension - d1 > 0:
-                                generated.append(eProd)
-                                w_level_brackets.append(([tuple1, tuple2], eProd, dep3))
+                            candidates.append((tuple1, tuple2, eProd, dep3))
+                candidates.sort(key=_one_hot_first)
+                for tuple1, tuple2, eProd, dep3 in candidates:
+                    d1 = brackets.dimension
+                    brackets.append(eProd)
+                    if brackets.dimension - d1 > 0:
+                        generated.append(eProd)
+                        w_level_brackets.append(([tuple1, tuple2], eProd, dep3))
                 for elem in self.levels[w]:
                     d1 = brackets.dimension
                     brackets.append(elem)
+                    elem_weight[id(elem)] = w
                     if brackets.dimension - d1 > 0:
                         w_level.append(elem)
                         w_level_brackets.append((elem, elem, 1))
@@ -569,6 +606,58 @@ class _symbol_core:
                 if len(w_level_triples) > 0:
                     self._GLA_generators["triples"][w] = w_level_triples
             self._GLA_generators["generated"] = generated
+            self._GLA_generators["elem_weight"] = elem_weight
+            span_index = dict()
+            node_elem = dict()
+            expr = dict()
+            spanning = dict()
+            coords = dict()
+            for w, entries in self._GLA_generators["map"].items():
+                exprs = []
+                S = []
+                for node, elem, dep in entries:
+                    span_index[id(elem)] = (w, len(exprs))
+                    S.append(elem)
+                    if dep == 1:
+                        exprs.append(None)
+                        node_elem[id(elem)] = elem
+                    else:
+                        exprs.append(node)
+                        node_elem[id(node)] = elem
+                expr[w] = exprs
+                spanning[w] = S
+                coords[w] = [
+                    list(decompose(b, S, assume_basis=True)[0]) for b in self.levels[w]
+                ]
+            neg_positions = self._negative_basis_positions()
+            self._GLA_generators["span_index"] = span_index
+            self._GLA_generators["node_elem"] = node_elem
+            self._GLA_generators["expr"] = expr
+            self._GLA_generators["spanning"] = spanning
+            self._GLA_generators["coords"] = coords
+            self._GLA_generators["level_positions"] = {
+                w: [neg_positions[(w, i)] for i in range(len(self.levels[w]))]
+                for w in self._GLA_generators["map"]
+            }
+            if self._parameters:
+                divisors = []
+                for rows in coords.values():
+                    for row in rows:
+                        for c in row:
+                            if _scalar_is_zero(c):
+                                continue
+                            _, d = as_numer_denom(c)
+                            if get_free_symbols(d):
+                                divisors.append(d)
+                if divisors:
+                    self._singularities["prolongation"] = expr_union_primitives(
+                        list(self._singularities.get("prolongation", [])) + divisors,
+                        self._parameters,
+                        process_rationals=True,
+                        fail_quietly=True,
+                    )
+            if self._compress_equation_systems:
+                self._generator_data()
             if (
                 self.assume_FGLA is True
                 and min(self._GLA_generators["generators"]) < -1

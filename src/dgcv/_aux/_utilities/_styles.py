@@ -5,15 +5,10 @@ module: dgcv._aux.styles
 
 
 ---
-Author (of this module): David Gamble Sykes
-
-Project page: https://realandimaginary.com/dgcv/
-
-Copyright (c) 2024-present David Gamble Sykes
-
-Licensed under the Apache License, Version 2.0
+Many themes in the THEME_REGISTRY, which are collections CSS properties used to style colors on html outputs, are AI-generated. And this module's tooling for emitting those themed CSS sets was heavily refactored with AI.
 
 SPDX-License-Identifier: Apache-2.0
+SPDX-AI-Disclosure: ai-generated
 """
 
 # -----------------------------------------------------------------------------
@@ -25,7 +20,7 @@ import colorsys
 import difflib
 import random
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from string import Template
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -4082,23 +4077,91 @@ def get_random_theme(vibrancy: float = 0.2) -> ThemeConfig:
     return out
 
 
+def _theme_from_mapping(data: Dict, theme_name: str = "<raw theme>") -> ThemeConfig:
+    known = {f.name for f in fields(ThemeConfig)}
+    required = {
+        f.name
+        for f in fields(ThemeConfig)
+        if f.default is MISSING and f.default_factory is MISSING
+    }
+
+    supplied, custom_css_vars, unknown = {}, {}, []
+    for key, value in data.items():
+        if key in ("name", "description"):
+            continue
+        if key == "custom_css_vars":
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"theme {theme_name!r}: 'custom_css_vars' must be a dict, "
+                    f"got {type(value).__name__}"
+                )
+            custom_css_vars.update(value)
+        elif key.startswith("--") or key.startswith("$"):
+            custom_css_vars[key] = value
+        elif key in known:
+            supplied[key] = value
+        else:
+            unknown.append(key)
+
+    if unknown:
+        raise ValueError(
+            f"theme {theme_name!r}: unrecognized keys {sorted(unknown)}; expected "
+            f"ThemeConfig fields, '--' custom properties, or '$' stubs"
+        )
+    missing = required - set(supplied)
+    if missing:
+        raise ValueError(
+            f"theme {theme_name!r}: missing required fields {sorted(missing)}"
+        )
+
+    supplied["custom_css_vars"] = custom_css_vars
+    return ThemeConfig(**supplied)
+
+
+def _coerce_theme_data(theme, theme_name: str = "<raw theme>"):
+    if isinstance(theme, ThemeConfig):
+        return theme
+    if isinstance(theme, dict):
+        return _theme_from_mapping(theme, theme_name)
+    return None
+
+
 def get_style(
-    theme_name: str, *args, return_theme_data: bool = False, minimal=False, **kwargs
+    theme_name: Union[str, ThemeConfig, Dict],
+    *args,
+    return_theme_data: bool = False,
+    minimal=False,
+    **kwargs,
 ) -> str:
     """
-    Returns a CSS ``:root { }`` block of dgcv theme variables for the given theme name.
+    Returns a CSS ``:root { }`` block of dgcv theme variables for the given theme.
 
-    Looks up ``theme_name`` in the THEME_REGISTRY and emits all theme fields and
-    custom variables as scoped CSS custom properties via ``ThemeConfig.to_css_string``.
+    Looks up ``theme_name`` in the THEME_REGISTRY, or accepts raw theme data in its
+    place, and emits all theme fields and custom variables as scoped CSS custom
+    properties via ``ThemeConfig.to_css_string``.
 
     Parameters:
     -----------
-    theme_name: str
+    theme_name: str | ThemeConfig | dict
         Name of the theme to look up. A light autocomplete (via the python difflib)
         will replace malformed str names to nearby themes if they exist.
         If ``theme_name`` is ``"random"``, a theme is selected at random from the
         registry. If ``theme_name`` or a close match is not found in the registry
         and is not ``"random"``, falls back silently to dgcv settings defualts.
+
+        Raw theme data may be supplied instead of a name, which renders a theme
+        without registering it. A ``ThemeConfig`` is used as given. A dict may pair
+        ``ThemeConfig`` field names with values and carry custom properties either
+        under a nested ``custom_css_vars`` key or as top level keys beginning with
+        ``--`` (or ``$``, for the assembly and randomization stubs), so that a
+        single flat JSON object is a complete theme. The keys ``name`` and
+        ``description`` are allowed as metadata and ignored; any other unrecognized
+        key, or a missing required field, raises ``ValueError``. Raw themes pass
+        through the same assembly and randomization pipeline as registered ones.
+
+        Raw theme data is also honored when it is the value of the ``theme`` entry
+        of the dgcv settings registry, which is how it reaches renderers that only
+        forward theme names.
 
     Returns:
     --------
@@ -4113,24 +4176,38 @@ def get_style(
         "dark": default_dark,
         "light": default_light,
     }
-    theme_name = theme_name.lower()
-    if difflib.get_close_matches(theme_name, ["shuffle"], n=1, cutoff=0.6):
-        theme_name = random.choice(get_dgcv_themes())
-    theme_name = aliases.get(theme_name, theme_name)
-    if theme_name not in THEME_REGISTRY and theme_name != "random":
-        close = difflib.get_close_matches(
-            theme_name, THEME_REGISTRY.keys(), n=1, cutoff=0.6
-        )
+    theme_data = _coerce_theme_data(theme_name)
+    if theme_data is not None:
         theme_name = (
-            close[0]
-            if close
-            else aliases.get(
-                get_dgcv_settings_registry().get("theme", default_dark), default_dark
-            )
+            theme_name.get("name", "<raw theme>")
+            if isinstance(theme_name, dict)
+            else "<raw theme>"
         )
-    theme_data = (
-        get_random_theme() if theme_name == "random" else THEME_REGISTRY[theme_name]
-    )
+    else:
+        theme_name = theme_name.lower()
+        if difflib.get_close_matches(theme_name, ["shuffle"], n=1, cutoff=0.6):
+            theme_name = random.choice(get_dgcv_themes())
+        theme_name = aliases.get(theme_name, theme_name)
+        if theme_name not in THEME_REGISTRY and theme_name != "random":
+            close = difflib.get_close_matches(
+                theme_name, THEME_REGISTRY.keys(), n=1, cutoff=0.6
+            )
+            if close:
+                theme_name = close[0]
+            else:
+                fallback = get_dgcv_settings_registry().get("theme", default_dark)
+                theme_data = _coerce_theme_data(fallback)
+                theme_name = (
+                    "<raw theme>"
+                    if theme_data is not None
+                    else aliases.get(fallback, default_dark)
+                )
+        if theme_data is None:
+            theme_data = (
+                get_random_theme()
+                if theme_name == "random"
+                else THEME_REGISTRY[theme_name]
+            )
     theme_data = assemble_parts(theme_data, minimal=minimal, theme_name=theme_name)
     theme_data = apply_randomization(theme_data, theme_name, minimal=minimal)
     if return_theme_data:

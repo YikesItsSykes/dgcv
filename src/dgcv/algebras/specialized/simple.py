@@ -280,6 +280,39 @@ class simple_Lie_algebra(algebra_class):
             lines.append(border_bottom)
 
             print("\n".join(lines))
+        elif self.simpleLieType[0] in {"E", "F", "G"}:
+            n = self.rank
+            branch = False
+            if self.simpleLieType[0] == "G":
+                chain, links = [1, 2], ["<≡≡"]
+            elif self.simpleLieType[0] == "F":
+                chain, links = [1, 2, 3, 4], ["───", "══>", "───"]
+            else:
+                chain = [1] + list(range(3, n + 1))
+                links, branch = ["───"] * (n - 2), True
+            lines = []
+            top_labels = "   " + " ".join(f"r_{i}" for i in chain)
+            horiz = "   " + "◯".join([""] + links + [""])
+
+            width_bound = len(top_labels) + 1
+            title = "│" + self.simpleLieType.center(width_bound) + " │"
+            border_top = "┌" + "─" * width_bound + "─┐"
+            head_sep = "╞" + "═" * width_bound + "═╡"
+            top_labels = "│" + top_labels + "  │"
+            horiz = "│" + horiz.ljust(width_bound) + " │"
+            border_bottom = "└" + "─" * width_bound + "─┘"
+
+            lines.append(border_top)
+            lines.append(title)
+            lines.append(head_sep)
+            lines.append(top_labels)
+            lines.append(horiz)
+            if branch:
+                lines.append("│" + (" " * 11 + "│").ljust(width_bound) + " │")
+                lines.append("│" + (" " * 11 + "◯ r_2").ljust(width_bound) + " │")
+            lines.append(border_bottom)
+
+            print("\n".join(lines))
 
     def parabolic_grading(self, roots=None):
         if roots is None:

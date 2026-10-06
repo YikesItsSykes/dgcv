@@ -354,6 +354,7 @@ def _alg_init(
     target_alg._grading_report = None
     target_alg._killing_form = None
     target_alg._derived_subalg_cache = None
+    target_alg._derived_subalg_lazy_cache = None
     target_alg._radical_cache = None
     target_alg._Levi_deco_cache = None
     target_alg._graded_components = None

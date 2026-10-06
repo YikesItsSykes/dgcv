@@ -2,8 +2,6 @@
 package: dgcv - Differential Geometry with Complex Variables
 module: dgcv.light_wrappers
 
-Notes: needs update for symbolic router architecture.
-
 Author (of this module): David Gamble Sykes
 Project page: https://realandimaginary.com/dgcv/
 
@@ -12,59 +10,61 @@ Licensed under the Apache License, Version 2.0
 SPDX-License-Identifier: Apache-2.0
 """
 
-# -----------------------------------------------------------------------------
-# imports and broadcasting
-# -----------------------------------------------------------------------------
-import re
-
-from .._aux._backends._engine import sympy_module_if_available
-from .._aux._utilities._config import get_dgcv_settings_registry
+from .._aux._backends._engine import engine_capability, engine_kind, engine_module
 from .._aux._vmf._safeguards import retrieve_passkey
 from .._aux.printing.printing._dgcv_display import LaTeX
-from .._aux.printing.printing._string_processing import _format_label_with_hi_low
+from .._aux.printing.printing._string_processing import _process_label, _verbose_labels
 
 __all__ = ["function_dgcv"]
 
-sp = sympy_module_if_available()
+
+def _sympy_function_dgcv(name):
+    sp = engine_module()
+
+    class _function_dgcv(sp.Function):
+        @classmethod
+        def eval(cls, *args):
+            return None
+
+        def _sympystr(self, printer):
+            return self.func.__name__
+
+        def _latex(self, printer, **kwargs):
+            tex = _process_label(self.func.__name__)
+            exp = kwargs.get("exp")
+            tail = ""
+            if _verbose_labels() and self.args:
+                tail = LaTeX(self.args)
+            if exp:
+                tex = f"{tex}^{{{exp}}}"
+            return tex + tail
+
+    return type(name, (_function_dgcv,), {})
 
 
-# -----------------------------------------------------------------------------
-# body
-# -----------------------------------------------------------------------------
-class _function_dgcv(sp.Function):
-    @classmethod
-    def eval(cls, *args):
-        return None
+def _sage_function_dgcv(name):
+    sage = engine_module()
+    tex = _process_label(name)
 
-    def _sympystr(self, printer):
-        return self.func.__name__
+    def print_latex(self, *args):
+        if _verbose_labels() and args:
+            return f"{tex}\\left({', '.join(str(arg) for arg in args)}\\right)"
+        return tex
 
-    def _latex(self, printer, **kwargs):
-        dgcvSR = get_dgcv_settings_registry()
-        name = self.func.__name__
-        tex = _process_label(name)
-        exp = kwargs.get("exp")
-        verbosity = dgcvSR.get("__", dict())
-        tail = ""
-        if dgcvSR.get("verbose_label_printing", False) or "verbose" in verbosity:
-            args = self.args
-            if args:
-                tail = LaTeX(args)
-        if exp:
-            tex = f"{tex}^{{{exp}}}"
-        return tex + tail
+    return sage.function(name, print_latex_func=print_latex)
 
 
-def function_dgcv(name: str):
-    clsname = str(name)
-    cls = type(clsname, (_function_dgcv,), {})
+def function_dgcv(name: str, real: bool = False, deriv_style: str = "subscript"):
+    name = str(name)
+    kind = engine_kind()
+    if kind == "sympy":
+        cls = _sympy_function_dgcv(name)
+    elif kind == "sage":
+        cls = _sage_function_dgcv(name)
+    else:
+        return engine_capability("function_head")(
+            name, real=real, deriv_style=deriv_style
+        )
     cls._dgcv_class_check = retrieve_passkey()
     cls._dgcv_category = "function"
     return cls
-
-
-def _process_label(lbl: str) -> str:
-    m = re.search(r"(\d+)$", lbl)
-    if m and "_" not in lbl:
-        lbl = lbl[: m.start(1)] + "_" + m.group(1)
-    return _format_label_with_hi_low(lbl)

@@ -8,6 +8,7 @@ from ..._aux._vmf._safeguards import retrieve_passkey
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.combinatorics.combinatorics import carProd
 from ..creators import createAlgebra
+from ._exceptional import _chevalley_structure_data, _exceptional_cartan_matrix
 
 
 def createSimpleLieAlgebra(
@@ -26,15 +27,16 @@ def createSimpleLieAlgebra(
         - B_n = so(2n+1)    for n>0
         - C_n = sp(2n)      for n>0
         - D_n = so(2n)      for n>0
+    or one of the exceptional types G2, F4, E6, E7, E8.
 
 
     Parameters
     ----------
     series : str
-        The type and rank of the Lie algebra, e.g., "A1", "A2", ..., "Dn".
+        The type and rank of the Lie algebra, e.g., "A1", "A2", ..., "Dn", "G2", "F4", "E6", "E7", "E8".
     label : str, optional
         Label for the Lie algebra. If not provided, defaults to a standard notation,
-        like sl2 for A2 etc.
+        like sl3 for A2, or g2, f4, e6, e7, e8 for the exceptional types.
     basis_labels : list, optional
         Labels for the basis elements. If not provided, default labels will be generated.
 
@@ -45,7 +47,16 @@ def createSimpleLieAlgebra(
 
     Notes
     -----
-    - Currently supports only the A, B, C, and D series (special linear Lie algebras: A_n = sl(n+1), etc.).
+    - The classical series are built as matrix algebras following
+      S. Helgason, Differential Geometry, Lie Groups, and Symmetric Spaces (Academic Press, 1978).
+    - The exceptional algebras are built in a Chevalley basis from their Cartan matrices: the
+      structure constants are N_{a,b} = +-(p+1) (J. E. Humphreys, Introduction to Lie Algebras and
+      Representation Theory, Springer, 1972, Section 25), with signs fixed on extraspecial pairs and
+      propagated by the identities in R. W. Carter, Simple Groups of Lie Type (Wiley, 1972), Chapter 4.
+      Simple roots are numbered as in the plates of N. Bourbaki, Lie Groups and Lie Algebras,
+      Chapters 4-6. The basis lists the Cartan subalgebra (simple coroots), then root vectors for
+      the positive roots by height, then for their negatives; the grading records each basis
+      element's coefficients on the simple roots. `build_standard_mat_rep` does not apply to them.
     """
     try:
         series_type, rank = series[0], int(series[1:])
@@ -1187,9 +1198,24 @@ def createSimpleLieAlgebra(
             )
 
     elif series_type + str(rank) in {"G2", "F4", "E6", "E7", "E8"}:
-        raise ValueError(
-            "Exceptional Lie algebras are not yet supported by `createSimpleLieAlgebra`."
-        ) from None
+        default_label = f"{series_type.lower()}{rank}" if label is None else label
+        structure_data, grading = _chevalley_structure_data(
+            _exceptional_cartan_matrix(series_type, rank)
+        )
+        passkey = retrieve_passkey()
+        return createAlgebra(
+            structure_data,
+            label=default_label,
+            basis_labels=basis_labels,
+            grading=grading,
+            assume_skew=True,
+            _simple={
+                "lockKey": passkey,
+                "type": [series_type, rank],
+            },
+            return_created_object=return_created_object,
+            forgo_vmf_registry=forgo_vmf_registry,
+        )
 
     else:
         raise ValueError(

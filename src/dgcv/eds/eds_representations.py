@@ -25,22 +25,39 @@ import numbers
 
 from .._aux._backends._cls_coercion import register_legacy_sympy_class
 from .._aux._backends._display import latex as _routed_latex
-from .._aux._backends._engine import engine_kind, sympy_module_if_available
+from .._aux._backends._engine import engine_kind
+from .._aux._backends._symbolic_router import _scalar_is_zero
 from .._aux._backends._symbolic_router import conjugate as _routed_conjugate
 from .._aux._backends._symbolic_router import simplify as _routed_simplify
 from .._aux._backends._types_and_constants import expr_numeric_types
 from .._aux._vmf._safeguards import retrieve_passkey
 from ..core.base import dgcv_class
-from .eds import abstDFAtom, abstDFMonom, abstract_DF, abstract_ZF, zeroFormAtom
-
-sp = sympy_module_if_available()
+from ._atoms import _zero_obstruction, zero_form_atom
+from ._forms import abstract_differential_form, abstract_differential_form_atom, abstract_differential_form_monomial
+from ._zero_forms import zero_form_class
 
 
 class DF_representation(dgcv_class):
     _dgcv_class_check = retrieve_passkey()
     _dgcv_category = "DF_representation"
 
-    def __new__(cls, row_count=None, col_count=None, array_data=None):
+    def __dgcv_conjugate__(self, symbolic=False):
+        return self._eval_conjugate()
+
+    def __dgcv_apply__(self, func, **kwargs):
+        return self.applyfunc(lambda entry: func(entry, **kwargs))
+
+    def __dgcv_solve_bridge__(self, bridge):
+        lowered = []
+        for entry in self:
+            lowered += bridge.lower(entry)
+        return lowered
+
+    @property
+    def __dgcv_zero_obstr__(self):
+        return _zero_obstruction(self)
+
+    def __init__(self, row_count=None, col_count=None, array_data=None):
         if all(arg is None for arg in [col_count, array_data]):
             if row_count is None:
                 array_data = tuple()
@@ -49,7 +66,13 @@ class DF_representation(dgcv_class):
                     row_count  # for optional syntax where only array data is given
                 )
 
-        dgcv_classes = [zeroFormAtom, abstDFAtom, abstDFMonom, abstract_DF, abstract_ZF]
+        dgcv_classes = [
+            zero_form_atom,
+            abstract_differential_form_atom,
+            abstract_differential_form_monomial,
+            abstract_differential_form,
+            zero_form_class,
+        ]
         supported_classes = tuple(dgcv_classes) + expr_numeric_types()
 
         if callable(array_data):
@@ -103,7 +126,9 @@ class DF_representation(dgcv_class):
                 raise ValueError(
                     f"DF_representation only supports entries from: {', '.join(str(cls) for cls in supported_classes)}"
                 )
-            sparse_data = tuple({k: v for k, v in array_data.items() if v != 0}.items())
+            sparse_data = tuple(
+                {k: v for k, v in array_data.items() if not _scalar_is_zero(v)}.items()
+            )
             array_data = tuple(
                 tuple(array_data.get((j, k), 0) for k in range(col_count))
                 for j in range(row_count)
@@ -125,16 +150,10 @@ class DF_representation(dgcv_class):
             sparse_data = {
                 array_data[j][k] for j in range(row_count) for k in range(col_count)
             }
-
-        obj = object.__new__(cls)
-        obj.row_count = row_count
-        obj.col_count = col_count
-        obj.array = array_data
-        obj.sparse_data = sparse_data
-        return obj
-
-    def __init__(self, row_count=0, col_count=0, array_data=tuple()):
-        pass
+        self.row_count = row_count
+        self.col_count = col_count
+        self.array = array_data
+        self.sparse_data = sparse_data
 
     def __getitem__(self, key):
         if isinstance(key, tuple):
@@ -156,6 +175,9 @@ class DF_representation(dgcv_class):
         for row in self.array:
             for entry in row:
                 yield entry
+
+    def __hash__(self):
+        return hash((self.row_count, self.col_count, self.array))
 
     def __eq__(self, other):
         if not isinstance(other, DF_representation):
@@ -185,7 +207,7 @@ class DF_representation(dgcv_class):
         return DF_representation(self.row_count, self.col_count, new_data)
 
     def __mul__(self, scalar):
-        if not isinstance(scalar, (abstract_ZF, zeroFormAtom)) or isinstance(
+        if not isinstance(scalar, (zero_form_class, zero_form_atom)) or isinstance(
             scalar, expr_numeric_types()
         ):
             raise TypeError("Can only multiply by scalar values")
@@ -257,7 +279,14 @@ class DF_representation(dgcv_class):
     def _eval_conjugate(self):
         def _custom_conj(expr):
             if isinstance(
-                expr, (abstract_ZF, zeroFormAtom, abstDFAtom, abstDFMonom, abstract_DF)
+                expr,
+                (
+                    zero_form_class,
+                    zero_form_atom,
+                    abstract_differential_form_atom,
+                    abstract_differential_form_monomial,
+                    abstract_differential_form,
+                ),
             ):
                 return expr._eval_conjugate()
             else:

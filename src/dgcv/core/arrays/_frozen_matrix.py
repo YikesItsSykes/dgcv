@@ -183,7 +183,9 @@ class _frozen_matrix:
         if kind is None:
             kind = engine_kind()
         if kind not in ("sage", "sympy"):
-            raise RuntimeError(f"Unsupported engine kind {kind!r}")
+            raise NotImplementedError(
+                f"engine matrices (eigenvalues, engine matrix methods) are not available in the {kind!r} symbolic engine; install sympy or sage and set `default_engine` accordingly"
+            )
 
         rep = self._engine_representation.get(kind, None)
         if rep is not None:

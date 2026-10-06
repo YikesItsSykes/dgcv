@@ -5,6 +5,7 @@ from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     get_free_symbols,
     is_zero_knowing_zero_is_expected,
+    simplify,
 )
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
@@ -13,6 +14,7 @@ from ...core.arrays import matrix_dgcv
 from ...core.dgcv_core import wedge
 from ..linear_algebra import _structure_array
 from ..threads import _indep_check
+from ..threads.util import _span_solver
 from .subspaces import algebra_subspace_class
 
 
@@ -25,6 +27,7 @@ def subalgebra(
     simplify_products_by_default=None,
     surface_singularities=None,
     base_field=None,
+    lazy_structure=False,
 ):
     from ..subspaces.subalgebras import subalgebra_class
 
@@ -107,6 +110,18 @@ def subalgebra(
                 surface_singularities=False,
             )
         )
+    if lazy_structure:
+        return subalgebra_class(
+            basis,
+            target_alg,
+            grading=grading,
+            _internal_lock=retrieve_passkey(),
+            span_warning=False,
+            simplify_basis=False,
+            simplify_products_by_default=simplify_products_by_default,
+            base_field=base_field,
+            _lazy_structure_data=True,
+        )
     testStruct = target_alg.is_subspace_subalgebra(
         basis,
         return_structure_data=True,
@@ -178,6 +193,62 @@ def new_alg_from_subalgebra(
     )
 
 
+def _closure_product_data(target_alg, elems):
+    if not elems:
+        return None
+    first = elems[0]
+    valence = getattr(first, "valence", None)
+    views = []
+    for elem in elems:
+        if (
+            get_dgcv_category(elem) != "algebra_element"
+            or elem.algebra is not target_alg
+            or elem.valence != valence
+        ):
+            return None
+        cd = elem.coeff_dict
+        if not isinstance(cd, dict):
+            return None
+        views.append(cd)
+    struct = target_alg.structureData
+    data = getattr(struct, "_data", None)
+    unspool = getattr(struct, "_unspool", None)
+    if not isinstance(data, dict) or unspool is None:
+        return None
+    table = {}
+    for flat, col in data.items():
+        col_data = getattr(col, "_data", None)
+        if not isinstance(col_data, dict):
+            return None
+        idx1, idx2 = unspool(flat)
+        row = table.get(idx1)
+        if row is None:
+            row = table[idx1] = {}
+        row[idx2] = col_data
+    sign = 1 if valence == 1 else -1
+    spbd = target_alg.simplify_products_by_default is True
+    return views, table, sign, spbd
+
+
+def _closure_product(fast, i, j):
+    views, table, sign, spbd = fast
+    new = {}
+    for idx1, c1 in views[i].items():
+        row = table.get(idx1)
+        if row is None:
+            continue
+        for idx2, c2 in views[j].items():
+            col = row.get(idx2)
+            if not col:
+                continue
+            scalar = sign * c1 * c2
+            for idx3, c3 in col.items():
+                new[idx3] = new.get(idx3, 0) + (
+                    simplify(scalar * c3) if spbd else scalar * c3
+                )
+    return {k: v for k, v in new.items() if not _scalar_is_zero(v)}
+
+
 def is_subspace_subalgebra(
     target_alg,
     elements,
@@ -200,6 +271,8 @@ def is_subspace_subalgebra(
         structure_data = _structure_array(dict(), new_dim)
     if not isinstance(return_structure_data, bool):
         return_structure_data = False
+    solver = _span_solver.build(filtered_elem)
+    fast = None if solver is None else _closure_product_data(target_alg, filtered_elem)
     for count, elem in enumerate(filtered_elem):
         if closed_under_product is False:
             break
@@ -207,18 +280,52 @@ def is_subspace_subalgebra(
         for j in range(lIdx, new_dim):
             if closed_under_product is False:
                 break
+            if fast is not None:
+                fc = solver.reduce_sparse(
+                    _closure_product(fast, count, j),
+                    surface_singularities=surface_singularities,
+                )
+                if fc is not None:
+                    residual, coeffs, new_sing = fc
+                    if surface_singularities:
+                        sing += new_sing
+                    if residual:
+                        closed_under_product = False
+                        structure_data = None
+                    elif return_structure_data:
+                        coeff_array = matrix_dgcv(
+                            {
+                                idx: coeff
+                                for idx, coeff in coeffs.items()
+                                if not _scalar_is_zero(coeff)
+                            },
+                            shape=(new_dim, 1),
+                        )
+                        structure_data[count, j] = coeff_array
+                        if skew:
+                            structure_data[j, count] = -coeff_array
+                    continue
             product = elem * filtered_elem[j]
-            ic = _indep_check(
-                filtered_elem,
-                product,
-                return_decomp_coeffs=return_structure_data,
-                surface_singularities=surface_singularities,
-            )
+            ic = None
+            if solver is not None:
+                ic = solver.reduce(
+                    product,
+                    return_decomp_coeffs=return_structure_data,
+                    surface_singularities=surface_singularities,
+                )
+            reduced = ic is not None
+            if not reduced:
+                ic = _indep_check(
+                    filtered_elem,
+                    product,
+                    return_decomp_coeffs=return_structure_data,
+                    surface_singularities=surface_singularities,
+                )
             if surface_singularities:
                 passCheck, new_sing = (
                     ic if return_structure_data is False else (ic[0], ic[2])
                 )
-                if passCheck is True:
+                if passCheck is True and not reduced:
                     ic = _indep_check(
                         filtered_elem,
                         product,

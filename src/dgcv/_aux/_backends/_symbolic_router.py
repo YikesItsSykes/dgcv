@@ -27,22 +27,51 @@ import math
 import numbers
 from fractions import Fraction
 
-from .._utilities._config import get_variable_registry
-from ._engine import engine_kind, engine_module
+from .._utilities._config import dgcv_warning, get_variable_registry
+from ._engine import engine_capability, engine_kind, engine_module
 from ._types_and_constants import (
+    as_fraction,
     constant_scalar_types,
+    expr_types,
     fast_scalar_types,
+    is_builtin_scalar,
     one,
+    to_active_engine,
     zero,
 )
+
+
+def _builtin_unsupported(name):
+    return NotImplementedError(
+        f"`{name}` is not available in dgcv's builtin symbolic engine; install sympy or sage and set `default_engine` accordingly"
+    )
+
+
+def _builtin_zf(x):
+    from ...eds._zero_forms import zero_form_class
+
+    return x if isinstance(x, zero_form_class) else zero_form_class(x)
 
 
 # -----------------------------------------------------------------------------
 # uilities
 # -----------------------------------------------------------------------------
+_plain_number_types = (int, Fraction, float)
+_zero_tests = {}
+
+
+def register_zero_test(tp, fn):
+    _zero_tests[tp] = fn
+
+
 def _scalar_is_zero(x) -> bool:
     if x is None:
         return False
+    if type(x) in _plain_number_types:
+        return x == 0
+    fn = _zero_tests.get(type(x))
+    if fn is not None:
+        return fn(x)
 
     z = getattr(x, "is_literal_zero", None)
     if z is None:
@@ -90,6 +119,12 @@ def exact_nonzero(x):
         return x != 0
 
     kind = engine_kind()
+    if kind == "builtin":
+        if isinstance(x, numbers.Number):
+            return x != 0
+        if is_builtin_scalar(x):
+            return engine_capability("exact_nonzero")(x)
+        return None
     try:
         if kind == "sage":
             for field in _exact_number_fields():
@@ -123,6 +158,8 @@ def is_zero_knowing_zero_is_expected(x) -> bool:
 
 
 def _scalar_is_one(x) -> bool:
+    if type(x) in _plain_number_types:
+        return x == 1
     io = getattr(x, "is_one", None)
     if isinstance(io, bool):
         return io
@@ -140,6 +177,28 @@ def _scalar_is_minus_one(x) -> bool:
         return _scalar_is_zero(x + 1)
     except Exception:
         return False
+
+
+def scalars_equal(a, b) -> bool:
+    if engine_kind() == "builtin" and (is_builtin_scalar(a) or is_builtin_scalar(b)):
+        if not all(
+            isinstance(v, numbers.Number) or is_builtin_scalar(v) for v in (a, b)
+        ):
+            return False
+        try:
+            return engine_capability("scalars_equal")(a, b)
+        except Exception:
+            return False
+    if isinstance(a, expr_types()) or isinstance(b, expr_types()):
+        try:
+            return _scalar_is_zero(a - b)
+        except Exception:
+            return False
+    try:
+        eq = a == b
+    except Exception:
+        return False
+    return eq if isinstance(eq, bool) else False
 
 
 class IndeterminateSignError(Exception):
@@ -192,6 +251,7 @@ def get_free_symbols(expr):
     """
     Return the set of atomic elements in symbolic expr
     """
+    expr = to_active_engine(expr)
     if hasattr(expr, "free_symbols"):
         return expr.free_symbols
 
@@ -201,10 +261,13 @@ def get_free_symbols(expr):
     return set()
 
 
-def simplify(expr, method=None, **kwargs):
+def simplify(expr, method=None, try_hard=False, **kwargs):
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_simplify__", None)
     if callable(f):
         try:
+            if try_hard:
+                return f(method=method, try_hard=True, **kwargs)
             return f(method=method, **kwargs)
         except Exception:
             return expr
@@ -263,6 +326,7 @@ def _resolve_subs_keys(expr, subs_data):
 
 
 def subs(expr, subs_data, **kwargs):
+    expr = to_active_engine(expr)
     if not subs_data:
         return expr
     f = getattr(expr, "subs", None)
@@ -286,6 +350,8 @@ def _conjugation_swaps(expr):
 
 
 def _symbolic_conjugate(expr):
+    if engine_kind() == "builtin":
+        return conjugate(expr)
     swaps = _conjugation_swaps(expr)
 
     if engine_kind() == "sage":
@@ -311,6 +377,7 @@ def _symbolic_conjugate(expr):
 
 
 def conjugate(expr, symbolic=False):
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_conjugate__", None)
     if callable(f):
         return f(symbolic=symbolic)
@@ -351,13 +418,11 @@ def ratio(x, y=1):
 
     kind = engine_kind()
 
-    if kind is None:
+    if kind is None or kind == "builtin":
         if isinstance(x, (float, complex)) or isinstance(y, (float, complex)):
             return x / y
-        if isinstance(x, Fraction) or isinstance(y, Fraction):
-            return Fraction(x) / Fraction(y)
-        if isinstance(x, numbers.Integral) and isinstance(y, numbers.Integral):
-            return Fraction(int(x), int(y))
+        if isinstance(x, numbers.Rational) and isinstance(y, numbers.Rational):
+            return as_fraction(x) / as_fraction(y)
         return x / y
 
     eng = engine_module()
@@ -417,10 +482,14 @@ def re(expr):
     """
     Return the real part of expr in the active symbolic engine.
     """
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_re__", None)
     if callable(f):
         return f()
     kind = engine_kind()
+
+    if kind == "builtin" and is_builtin_scalar(expr):
+        return simplify((expr + conjugate(expr)) / 2)
 
     if kind == "sympy":
         sp = engine_module()
@@ -449,10 +518,16 @@ def im(expr):
     """
     Return the imaginary part of expr in the active symbolic engine.
     """
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_im__", None)
     if callable(f):
         return f()
     kind = engine_kind()
+
+    if kind == "builtin" and is_builtin_scalar(expr):
+        from ._types_and_constants import imag_unit
+
+        return simplify((expr - conjugate(expr)) / (2 * imag_unit()))
 
     if kind == "sympy":
         sp = engine_module()
@@ -478,47 +553,146 @@ def im(expr):
 
 
 def log(expr):
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_log__", None)
     if callable(f):
         return f()
+    return engine_module().log(expr)
 
-    kind = engine_kind()
 
-    if kind == "sympy":
-        return engine_module().log(expr)
+def ln(expr):
+    return log(expr)
 
-    if kind == "sage":
-        return engine_module().log(expr)
 
-    import math
+def _trig(name, expr):
+    expr = to_active_engine(expr)
+    f = getattr(expr, f"__dgcv_{name}__", None)
+    if callable(f):
+        return f()
+    return getattr(engine_module(), name)(expr)
 
-    return math.log(expr)
+
+def sin(expr):
+    return _trig("sin", expr)
+
+
+def cos(expr):
+    return _trig("cos", expr)
+
+
+def tan(expr):
+    return _trig("tan", expr)
+
+
+def cot(expr):
+    return _trig("cot", expr)
+
+
+def sec(expr):
+    return _trig("sec", expr)
+
+
+def csc(expr):
+    return _trig("csc", expr)
+
+
+def sinh(expr):
+    return _trig("sinh", expr)
+
+
+def cosh(expr):
+    return _trig("cosh", expr)
+
+
+def tanh(expr):
+    return _trig("tanh", expr)
+
+
+def coth(expr):
+    return _trig("coth", expr)
+
+
+def sech(expr):
+    return _trig("sech", expr)
+
+
+def csch(expr):
+    return _trig("csch", expr)
+
+
+def asin(expr):
+    return _trig("asin", expr)
+
+
+def acos(expr):
+    return _trig("acos", expr)
+
+
+def atan(expr):
+    return _trig("atan", expr)
+
+
+def acot(expr):
+    return _trig("acot", expr)
+
+
+def asec(expr):
+    return _trig("asec", expr)
+
+
+def acsc(expr):
+    return _trig("acsc", expr)
+
+
+def asinh(expr):
+    return _trig("asinh", expr)
+
+
+def acosh(expr):
+    return _trig("acosh", expr)
+
+
+def atanh(expr):
+    return _trig("atanh", expr)
+
+
+def acoth(expr):
+    return _trig("acoth", expr)
+
+
+def asech(expr):
+    return _trig("asech", expr)
+
+
+def acsch(expr):
+    return _trig("acsch", expr)
 
 
 def exp(expr):
+    expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_exp__", None)
     if callable(f):
         return f()
 
-    kind = engine_kind()
-
-    if kind in ("sympy", "sage"):
-        return engine_module().exp(expr)
-
-    import math
-
-    return math.exp(expr)
+    return engine_module().exp(expr)
 
 
 def as_numer_denom(expr):
     """
     Return (numerator, denominator) for expr in the active symbolic engine.
     """
+    expr = to_active_engine(expr)
     kind = engine_kind()
 
     f = getattr(expr, "as_numer_denom", None)
     if callable(f):
         return f()
+    if kind == "builtin":
+        if isinstance(expr, numbers.Rational) and not isinstance(expr, bool):
+            return expr.numerator, expr.denominator
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr).as_numer_denom()
+        return expr, one()
     if kind == "sympy":
         try:
             sp = engine_module()
@@ -613,13 +787,74 @@ def clear_denominators(seq, *, return_scale=False):
     return (out, L) if return_scale else out
 
 
+_SAGE_METHOD_ALIASES = {
+    "simplify": "simplify_full",
+    "factor": "factor",
+    "expand": "expand",
+    "trigsimp": "simplify_trig",
+    "cancel": "simplify_rational",
+    "ratsimp": "simplify_rational",
+    "together": "combine",
+    "apart": "partial_fraction",
+    "logcombine": "simplify_log",
+    "expand_log": "expand_log",
+    "expand_trig": "expand_trig",
+}
+_engine_method_warned = set()
+
+
+def engine_method(expr, name, **kwargs):
+    expr = to_active_engine(expr)
+    kind = engine_kind()
+    if kind == "builtin":
+        if isinstance(expr, numbers.Number):
+            return expr
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr)._engine_method(name, **kwargs)
+        raise _builtin_unsupported(name)
+    if kind == "sympy":
+        fn = getattr(engine_module(), name, None)
+        if not callable(fn):
+            return expr
+        try:
+            return fn(expr, **kwargs)
+        except Exception:
+            return expr
+    if kind == "sage":
+        alias = _SAGE_METHOD_ALIASES.get(name)
+        if alias is None:
+            if name not in _engine_method_warned:
+                _engine_method_warned.add(name)
+                dgcv_warning(
+                    f"`{name}` has no sage equivalent; the expression was returned unchanged."
+                )
+            return expr
+        fn = getattr(expr, alias, None)
+        if not callable(fn):
+            return expr
+        try:
+            return fn(**kwargs)
+        except Exception:
+            try:
+                return fn()
+            except Exception:
+                return expr
+    return expr
+
+
 def expand(expr, **kwargs):
     """
     Expand expr using the active symbolic engine, intended as a backend hook for
     expand_dgcv (and polynomial expansion).
     """
 
+    expr = to_active_engine(expr)
     kind = engine_kind()
+    if kind == "builtin":
+        if isinstance(expr, numbers.Number):
+            return expr
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr)._builtin_expand()
     f = getattr(expr, "__dgcv_expand__", None)
     if f:
         try:
@@ -650,15 +885,24 @@ def expand(expr, **kwargs):
     return expr
 
 
-def factor(expr, **kwargs):
+def factor(expr, try_hard=False, **kwargs):
     """
     Factor expr using the active symbolic engine, intended as a backend hook for
     factor_dgcv (and polynomial factoring).
     """
+    expr = to_active_engine(expr)
     kind = engine_kind()
+
+    if kind == "builtin":
+        if isinstance(expr, numbers.Number):
+            return expr
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr)._engine_method("factor", try_hard=try_hard)
 
     f = getattr(expr, "__dgcv_apply__", None)
     if f:
+        if try_hard:
+            kwargs = dict(kwargs, try_hard=True)
         try:
             return f(factor, **kwargs)
         except TypeError:
@@ -693,7 +937,14 @@ def cancel(expr, **kwargs):
     Cancel common factors in a rational expression using the active symbolic engine,
     intended as a backend hook for cancel_dgcv (and rational simplification).
     """
+    expr = to_active_engine(expr)
     kind = engine_kind()
+
+    if kind == "builtin":
+        if isinstance(expr, numbers.Number):
+            return expr
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr)._builtin_simplify()
 
     f = getattr(expr, "__dgcv_apply__", None)
     if f:
@@ -719,12 +970,19 @@ def cancel(expr, **kwargs):
 
 
 def collect(expr, syms):
+    expr = to_active_engine(expr)
     kind = engine_kind()
 
     if isinstance(syms, (list, tuple, set, frozenset)):
         syms = list(syms)
     else:
         syms = [syms]
+
+    if kind == "builtin":
+        if isinstance(expr, numbers.Number):
+            return expr
+        if is_builtin_scalar(expr):
+            return _builtin_zf(expr).collect(syms)
 
     f = getattr(expr, "__dgcv_apply__", None)
     if f:
@@ -762,6 +1020,7 @@ def defloat(expr, *, heuristic=False, **kwargs):
 
     This should not be relied upon for exact computation programmatically. Instead, it is intended as a convenience utility for copy/pasting printed math, as printed expressions tipically format exact ratios into syntax that compiles with floating point numbers.
     """
+    expr = to_active_engine(expr)
     if isinstance(expr, list):
         return [defloat(inner, heuristic=heuristic, **kwargs) for inner in expr]
     if isinstance(expr, tuple):
@@ -773,20 +1032,46 @@ def defloat(expr, *, heuristic=False, **kwargs):
             )
             for k, v in expr.items()
         }
+    kind = engine_kind()
+    if kind == "builtin" and is_builtin_scalar(expr):
+        return _builtin_defloat(expr, heuristic=heuristic)
     f = getattr(expr, "__dgcv_apply__", None)
     if f:
         return f(defloat, heuristic=heuristic, **kwargs)
-    kind = engine_kind()
     if kind == "sympy":
         return engine_module().nsimplify(expr)
     if kind == "sage":
         return _sage_defloat(expr, heuristic=heuristic)
 
-    # fallback
+    if isinstance(expr, float):
+        return _float_to_fraction(expr, heuristic)
     f = getattr(expr, "as_integer_ratio", None)
     if callable(f):
         n, d = f()
         return Fraction(n, d)
+    return expr
+
+
+def _float_to_fraction(x, heuristic):
+    if heuristic:
+        return Fraction(x).limit_denominator(10**6)
+    return Fraction(str(x))
+
+
+def _builtin_defloat(expr, *, heuristic=False):
+    from ...eds._zero_forms import zero_form_class
+
+    def walk(b):
+        if isinstance(b, zero_form_class):
+            return walk(b.base)
+        if isinstance(b, tuple):
+            return (b[0], *[walk(a) for a in b[1:]])
+        if isinstance(b, float):
+            return _float_to_fraction(b, heuristic)
+        return b
+
+    if isinstance(expr, zero_form_class):
+        return zero_form_class(walk(expr.base))
     return expr
 
 

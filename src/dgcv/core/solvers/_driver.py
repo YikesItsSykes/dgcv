@@ -1,14 +1,9 @@
-from ..._aux._backends._engine import engine_kind, engine_module
+from ..._aux._backends._engine import engine_capability, engine_kind, engine_module
 from ..._aux._backends._polynomials import expr_union_primitives
 from ..._aux._backends._symbolic_router import get_free_symbols, simplify
-from ..._aux._backends._types_and_constants import (
-    expr_numeric_types,
-    expr_types,
-    is_atomic,
-)
+from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._utilities._config import get_dgcv_settings_registry
 from ..._aux._vmf.vmf import order_coordinates
-from ...eds.eds import _sympy_to_abstract_ZF, abstract_ZF, zeroFormAtom
 from ._linsolve import _dgcv_linsolve, _sage_engine_linsolve
 from ._normalization import _equations_preprocessing, normalize_equations_and_vars
 from ._solution_shapes import (
@@ -113,7 +108,7 @@ def solve_dgcv(
         return (out, []) if return_divisors else out
 
     eqns, vars_to_solve = normalize_equations_and_vars(eqns, vars_to_solve)
-    processed_eqns, system_vars, extra_vars, variables_dict = _equations_preprocessing(
+    processed_eqns, system_vars, extra_vars, bridge = _equations_preprocessing(
         eqns, vars_to_solve
     )
 
@@ -126,38 +121,10 @@ def solve_dgcv(
             return x
 
     def _expr_reformatting(expr):
-        if not hasattr(expr, "subs"):
-            return expr
-
-        dgcv_var_dict = {v[1][0]: v[0] for _, v in variables_dict.items()}
-
-        if not isinstance(expr, expr_types()) or isinstance(expr, zeroFormAtom):
-            try:
-                return expr.subs(dgcv_var_dict)
-            except Exception:
-                return abstract_ZF(_sympy_to_abstract_ZF(expr, dgcv_var_dict))
-
-        regular_var_dict = {k: v for k, v in dgcv_var_dict.items() if is_atomic(k)}
-
-        try:
-            bad = not all(
-                isinstance(v, expr_numeric_types()) or isinstance(v, expr_types())
-                for v in regular_var_dict.values()
-            )
-        except Exception:
-            bad = True
-
-        if bad:
-            return abstract_ZF(_sympy_to_abstract_ZF(expr, regular_var_dict))
-
-        try:
-            return expr.subs(regular_var_dict)
-        except Exception:
-            return abstract_ZF(_sympy_to_abstract_ZF(expr, regular_var_dict))
+        return bridge.lift_expr(expr)
 
     def _extract_reformatting(var):
-        s = str(var)
-        return variables_dict[s][0] if s in variables_dict else var
+        return bridge.lift_var(var)
 
     mod = engine_module()
 
@@ -234,6 +201,16 @@ def solve_dgcv(
         nonlocal preformatted_solutions, divisors, custom_succeeded, custom_ran
         custom_ran = True
         try:
+            _run_custom_linsolve_body()
+        except NotImplementedError:
+            raise
+        except Exception:
+            preformatted_solutions = []
+            custom_succeeded = False
+
+    def _run_custom_linsolve_body():
+        nonlocal preformatted_solutions, divisors, custom_succeeded
+        if True:
             if return_divisors:
                 preformatted_solutions, d = _dgcv_linsolve(
                     processed_eqns,
@@ -254,9 +231,6 @@ def solve_dgcv(
                     simplify_pivots=simplify_pivots,
                 )
             custom_succeeded = True
-        except Exception:
-            preformatted_solutions = []
-            custom_succeeded = False
 
     def _run_engine_linsolve():
         nonlocal preformatted_solutions, engine_linsolve_ran
@@ -267,10 +241,21 @@ def solve_dgcv(
         engine_linsolve_ran = res is not None
         preformatted_solutions = res or []
 
+    def _run_secondary_solve():
+        nonlocal preformatted_solutions
+        res = engine_capability("solve_secondary")(
+            list(processed_eqns), list(system_vars)
+        )
+        preformatted_solutions = [
+            {var: sol.get(var, var) for var in system_vars}
+            for sol in (res or [])
+            if isinstance(sol, dict)
+        ]
+
     def _run_engine_solve():
         nonlocal preformatted_solutions, engine_solve_failed
         try:
-            if engine_kind() == "sage":
+            if engine_kind() == "sage" and not bridge.standins:
                 res = _engine_solve(eqns, vars_to_solve)
             else:
                 res = _engine_solve(processed_eqns, system_vars)
@@ -285,7 +270,18 @@ def solve_dgcv(
             "'linear_parametric', or 'solve'."
         )
 
-    if method in _LINEAR_METHODS:
+    if engine_kind() == "builtin":
+        secondary_kind = engine_capability("secondary_kind")
+        if method == "solve" and secondary_kind() is not None:
+            _run_secondary_solve()
+        else:
+            try:
+                _run_custom_linsolve_body()
+            except NotImplementedError:
+                if secondary_kind() is None:
+                    raise
+                _run_secondary_solve()
+    elif method in _LINEAR_METHODS:
         prefer_engine_first = (
             method == "linear_parametric"
             and engine_kind() == "sage"
@@ -367,9 +363,7 @@ def _no_solutions(result):
     return not payload
 
 
-def solve_knowing_solution_exists(
-    eqns, vars_to_solve=None, *, try_hard=True, **kwargs
-):
+def solve_knowing_solution_exists(eqns, vars_to_solve=None, *, try_hard=True, **kwargs):
     result = solve_dgcv(eqns, vars_to_solve, **kwargs)
     if not try_hard or not _no_solutions(result):
         return result

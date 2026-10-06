@@ -104,6 +104,14 @@ class _tensor_field_construction:
                         varSpace, coeff_dict, valence, data_shape
                     )
                 )
+            elif _inheritance and _inheritance.get("_canonical"):
+                first_key = next(iter(coeff_dict))
+                deg = len(first_key) // 3
+                self.coordinates = tuple() if varSpace is None else tuple(varSpace)
+                self.valence = tuple(first_key[deg : 2 * deg])
+                self.coeff_dict = coeff_dict
+                self.data_shape = data_shape
+                self._validated_format = _inheritance["_validated_format"]
             else:
                 self._variable_spaces = _infer_variable_spaces_from_coeff_dict(
                     coeff_dict, self._variable_spaces

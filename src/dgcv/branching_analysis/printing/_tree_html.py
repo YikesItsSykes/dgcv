@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import uuid
 
-from ..._aux._utilities._config import latex_in_html
 from .._traversal import count_leaves
 from ._conditions_latex import condition_strings, represents_strings
 from ._styles import html_style

@@ -132,11 +132,11 @@ class subalgebra_element(dgcv_class):
             return obj
 
     def __dgcv_simplify__(self, *args, **kwargs):
-        newCoeffs = {k: simplify(v) for k, v in self.coeff_dict.items()}
+        newCoeffs = {k: simplify(v, **kwargs) for k, v in self.coeff_dict.items()}
         return subalgebra_element(self.algebra, newCoeffs, self.valence)
 
     def _eval_simplify(self, *args, **kwargs):
-        newCoeffs = {k: simplify(v) for k, v in self.coeff_dict.items()}
+        newCoeffs = {k: simplify(v, **kwargs) for k, v in self.coeff_dict.items()}
         return subalgebra_element(self.algebra, newCoeffs, self.valence)
 
     def subs(self, subsData):
@@ -286,13 +286,12 @@ class subalgebra_element(dgcv_class):
             if self.algebra == other.algebra and self.valence == other.valence:
                 sign = 1 if self.valence == 1 else -1
                 alg = self.algebra
-                struct = alg.structureData
                 spbd = self.algebra.simplify_products_by_default
                 new_coeffs = dict()
                 for idx1, c1 in self.coeff_dict.items():
                     for idx2, c2 in other.coeff_dict.items():
                         scalar = sign * c1 * c2
-                        row = struct[idx1, idx2]
+                        row = alg._structure_row(idx1, idx2)
                         for idx3, c3 in row._data.items():
                             new_coeffs[idx3] = new_coeffs.get(idx3, 0) + (
                                 self._si_wrap(scalar * c3) if spbd else scalar * c3

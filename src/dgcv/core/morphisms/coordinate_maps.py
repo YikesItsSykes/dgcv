@@ -118,7 +118,7 @@ class coordinate_map(dgcv_class):
         return self._eval_simplify(**kwargs)
 
     def _eval_simplify(self, **kwargs):
-        self.coordinate_formulas = [simplify(f) for f in self.coordinate_formulas]
+        self.coordinate_formulas = [simplify(f, **kwargs) for f in self.coordinate_formulas]
         self._JacobianMatrix = None
         return self
 

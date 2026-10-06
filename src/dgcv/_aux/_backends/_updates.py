@@ -58,6 +58,8 @@ baseline_defaults: Dict[str, Any] = {
     "extra_support_for_math_in_tables": False,
     "conjugation_prefix": "BAR",
     "_solve_default": "solve",
+    "forgo_CAS_provenance_pruning": False,
+    "forgo_builtin_probabilistic_shortcuts": False,
 }
 
 
@@ -75,6 +77,7 @@ changes: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ),
     ("0.4.20", {"theme": "paper_graphite"}),
     ("0.4.36", {"default_symbolic_engine": _infer_engine}),
+    ("0.5.0", {"default_symbolic_engine": "builtin"}),
 )
 
 
@@ -100,9 +103,9 @@ def defaults_for_version(
             out.update(patch)
 
     if out.get("default_symbolic_engine") == _infer_engine:
-        from .._utilities._config import default_engine_inference
+        from .._utilities._config import legacy_engine_inference
 
-        out["default_symbolic_engine"] = default_engine_inference()
+        out["default_symbolic_engine"] = legacy_engine_inference()
 
     out["VLP"] = vlp
     out["version_specific_defaults"] = f"v{target.major}.{target.minor}.{target.patch}"

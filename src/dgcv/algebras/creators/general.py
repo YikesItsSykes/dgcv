@@ -226,7 +226,7 @@ def createAlgebra(
 
     def _branch_inference(elems):
         gate = False
-        types = {"algebra_element", "subalgebra_element", "vector_space_element"}
+        types = {"algebra_element", "subalgebra_element"}
         for elem in elems:
             if get_dgcv_category(elem) == "tensorProduct":
                 gate = True

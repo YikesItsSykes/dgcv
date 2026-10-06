@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 name = "dgcv"
-version = "0.5.1"
+version = "0.6.0"
 description = "Differential Geometry with Complex Variables"
 authors = [{ name = "David Sykes", email = "david@realandimaginary.com" }]
 license = "Apache-2.0"

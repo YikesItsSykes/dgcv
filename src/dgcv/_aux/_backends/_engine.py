@@ -25,6 +25,7 @@ SPDX-License-Identifier: Apache-2.0
 # -----------------------------------------------------------------------------
 import importlib
 import importlib.util
+import sys
 
 from .._utilities._config import dgcv_warning, get_dgcv_settings_registry
 
@@ -36,6 +37,7 @@ __all__ = [
     "available_engine_kinds",
     "engine_module",
     "engine_kind",
+    "engine_capability",
     "invalidate_engine_cache",
 ]
 
@@ -48,6 +50,9 @@ _engine_module = None
 _sympy_module = None
 _sage_module = None
 _sage_available = None
+_builtin_module = None
+_builtin_fallback_warned = False
+_capabilities = None
 
 
 def is_sage_available():
@@ -113,13 +118,46 @@ def available_engine_kinds():
         out.append("sage")
     if is_sympy_available():
         out.append("sympy")
+    out.append("builtin")
     return tuple(out)
 
 
+def _get_builtin_module():
+    global _builtin_module
+    if _builtin_module is None:
+        from ..._symbolic_scalars import _engine_api
+
+        _builtin_module = _engine_api
+    return _builtin_module
+
+
+def _builtin_fallback(requested):
+    global _builtin_fallback_warned
+    if not _builtin_fallback_warned:
+        _builtin_fallback_warned = True
+        dgcv_warning(
+            f"dgcv: default symbolic engine setting is {requested!r} but neither Sage nor SymPy is available; "
+            "using dgcv's builtin symbolic engine (rational expressions only).",
+            stacklevel=2,
+        )
+    return "builtin"
+
+
+def notify_vmf_cleared():
+    mod = sys.modules.get("dgcv._symbolic_scalars._secondary")
+    if mod is not None:
+        mod.invalidate_secondary_cache()
+    mod = sys.modules.get("dgcv._symbolic_scalars._poly")
+    if mod is not None:
+        mod._kinds_stale[0] = True
+
+
 def invalidate_engine_cache():
-    global _engine_kind, _engine_module
+    global _engine_kind, _engine_module, _capabilities
     _engine_kind = None
     _engine_module = None
+    _capabilities = None
+    notify_vmf_cleared()
 
     try:
         from ._types_and_constants import invalidate_types_and_constants_cache
@@ -138,10 +176,13 @@ def invalidate_engine_cache():
 
 def _resolve_engine_kind():
     settings = get_dgcv_settings_registry()
-    requested = str(settings.get("default_symbolic_engine", "sympy")).lower()
+    requested = str(settings.get("default_symbolic_engine", "builtin")).lower()
 
     if requested in ("sagemath",):
         requested = "sage"
+
+    if requested == "builtin":
+        return "builtin"
 
     if requested == "sage":
         if is_sage_available():
@@ -153,11 +194,7 @@ def _resolve_engine_kind():
                 stacklevel=2,
             )
             return "sympy"
-        dgcv_warning(
-            "dgcv: no symbolic engine was found, and dgcv requires one (either Sage or Sympy)",
-            stacklevel=2,
-        )
-        return None
+        return _builtin_fallback(requested)
 
     if requested == "sympy":
         if is_sympy_available():
@@ -169,39 +206,33 @@ def _resolve_engine_kind():
                 stacklevel=2,
             )
             return "sage"
-        dgcv_warning(
-            "dgcv: no symbolic engine was found, and dgcv requires one (either Sage or Sympy)",
-            stacklevel=2,
-        )
-        return None
-
-    if is_sympy_available():
-        dgcv_warning(
-            f"dgcv: unrecognized symbolic engine {requested!r}; falling back to 'sympy'.",
-            stacklevel=2,
-        )
-        return "sympy"
-
-    if is_sage_available():
-        dgcv_warning(
-            f"dgcv: unrecognized symbolic engine {requested!r}; falling back to 'sage'.",
-            stacklevel=2,
-        )
-        return "sage"
+        return _builtin_fallback(requested)
 
     dgcv_warning(
-        f"dgcv: unrecognized symbolic engine {requested!r}, "
-        "and no supported symbolic engine is available.",
+        f"dgcv: unrecognized symbolic engine {requested!r}; falling back to 'builtin'.",
         stacklevel=2,
     )
-    return None
+    return "builtin"
 
 
 def engine_kind():
     global _engine_kind
     if _engine_kind is None:
         _engine_kind = _resolve_engine_kind()
+        if _engine_kind == "builtin":
+            _get_builtin_module()
     return _engine_kind
+
+
+def engine_capability(name):
+    global _capabilities
+    caps = _capabilities
+    if caps is None:
+        caps = getattr(engine_module(), "dgcv_capabilities", None)
+        if caps is None:
+            caps = {}
+        _capabilities = caps
+    return caps.get(name)
 
 
 def engine_module():
@@ -213,6 +244,10 @@ def engine_module():
         return _engine_module
     if kind == "sage":
         _engine_module = _get_sage_module()
-    else:
+    elif kind == "sympy":
         _engine_module = _get_sympy_module()
+    elif kind == "builtin":
+        _engine_module = _get_builtin_module()
+    else:
+        raise RuntimeError(f"dgcv: unknown symbolic engine kind {kind!r}")
     return _engine_module

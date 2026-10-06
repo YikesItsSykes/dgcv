@@ -54,8 +54,6 @@ dgcv_categories = {
     "algebra_subspace",
     "subalgebra",
     "subalgebra_element",
-    "vectorSpace",
-    "vector_space_element",
 }
 
 greek_letters = {
@@ -173,30 +171,34 @@ class StringifiedSymbolsDict(collections.abc.MutableMapping):
         return f"StringifiedSymbolsDict({self._data})"
 
 
-variable_registry = {
-    "standard_variable_systems": {},
-    "complex_variable_systems": {},
-    "finite_algebra_systems": {},
-    "misc": {},
-    "eds": {"atoms": {}, "coframes": {}},
-    "protected_variables": set(),
-    "temporary_variables": set(),
-    "obscure_variables": set(),
-    "conversion_dictionaries": {
-        "holToReal": StringifiedSymbolsDict(),
-        "realToSym": StringifiedSymbolsDict(),
-        "symToHol": StringifiedSymbolsDict(),
-        "symToReal": StringifiedSymbolsDict(),
-        "realToHol": StringifiedSymbolsDict(),
-        "conjugation": StringifiedSymbolsDict(),
-        "find_parents": StringifiedSymbolsDict(),
-        "real_part": StringifiedSymbolsDict(),
-        "im_part": StringifiedSymbolsDict(),
-    },
-    "dgcv_enforced_real_atoms": dict(),  # only for symbolic engines not supporting complex variables logic
-    "_labels": {},
-    "paths": {},
-}
+def _fresh_variable_registry():
+    return {
+        "standard_variable_systems": {},
+        "complex_variable_systems": {},
+        "finite_algebra_systems": {},
+        "misc": {},
+        "eds": {"atoms": {}, "coframes": {}},
+        "protected_variables": set(),
+        "temporary_variables": set(),
+        "obscure_variables": set(),
+        "conversion_dictionaries": {
+            "holToReal": StringifiedSymbolsDict(),
+            "realToSym": StringifiedSymbolsDict(),
+            "symToHol": StringifiedSymbolsDict(),
+            "symToReal": StringifiedSymbolsDict(),
+            "realToHol": StringifiedSymbolsDict(),
+            "conjugation": StringifiedSymbolsDict(),
+            "find_parents": StringifiedSymbolsDict(),
+            "real_part": StringifiedSymbolsDict(),
+            "im_part": StringifiedSymbolsDict(),
+        },
+        "dgcv_enforced_real_atoms": dict(),
+        "_labels": {},
+        "paths": {},
+    }
+
+
+variable_registry = _fresh_variable_registry()
 vlp = re.compile(
     r"""
     ^(?:\\left\((?P<content>.*)\\right\))?   
@@ -253,8 +255,12 @@ def on_sage_kernel_inference():
     return _sage_kernel_default
 
 
-def default_engine_inference():
+def legacy_engine_inference():
     return "sage" if on_sage_kernel_inference() else "sympy"
+
+
+def default_engine_inference():
+    return "builtin"
 
 
 dgcv_settings_registry = {
@@ -265,6 +271,7 @@ dgcv_settings_registry = {
     "ask_before_overwriting_objects_in_vmf": True,
     "forgo_warnings": False,
     "default_symbolic_engine": default_engine_inference(),
+    "secondary_symbolic_engine": "auto",
     "verbose_label_printing": False,
     "print_style": "readable",
     "VLP": vlp,
@@ -284,6 +291,10 @@ dgcv_settings_registry = {
     "DEBUG": False,
     "force_rich_display": False,
     "simplify_singularity_ideals_by_default": True,
+    "forgo_CAS_provenance_pruning": False,
+    "forgo_builtin_probabilistic_shortcuts": False,
+    "secondary_time_budget": None,
+    "generic_structure_constants": None,
     "_solve_default": "auto",
     "__": dict(),
 }
@@ -299,27 +310,7 @@ def get_dgcv_settings_registry():
 
 def clear_variable_registry():
     global variable_registry
-    variable_registry = {
-        "standard_variable_systems": {},
-        "complex_variable_systems": {},
-        "finite_algebra_systems": {},
-        "protected_variables": set(),
-        "temporary_variables": set(),
-        "obscure_variables": set(),
-        "conversion_dictionaries": {
-            "holToReal": {},
-            "realToSym": {},
-            "symToHol": {},
-            "symToReal": {},
-            "realToHol": {},
-            "conjugation": {},
-            "find_parents": {},
-            "real_part": {},
-            "im_part": {},
-        },
-        "dgcv_enforced_real_atoms": dict(),
-        "_labels": {},
-    }
+    variable_registry = _fresh_variable_registry()
 
 
 def canonicalize(obj, with_simplify=False, depth=1000):
@@ -534,6 +525,36 @@ def _latex_in_html_katex_css() -> str:
     )
 
 
+_ELEMENTARY_LABELS = (
+    "exp",
+    "log",
+    "sin",
+    "cos",
+    "tan",
+    "cot",
+    "sec",
+    "csc",
+    "sinh",
+    "cosh",
+    "tanh",
+    "coth",
+    "sech",
+    "csch",
+    "asin",
+    "acos",
+    "atan",
+    "acot",
+    "asec",
+    "acsc",
+    "asinh",
+    "acosh",
+    "atanh",
+    "acoth",
+    "asech",
+    "acsch",
+)
+
+
 def configure_convenient_labels(
     libraries: Optional[
         List[
@@ -542,6 +563,7 @@ def configure_convenient_labels(
                 "most",
                 "complex variables",
                 "symbolic expressions",
+                "elementary functions",
                 "abbreviations",
             ]
         ]
@@ -617,6 +639,16 @@ def configure_convenient_labels(
         configured_by_library["symbolic expressions"] = sorted(
             new_functions, key=str.lower
         )
+    if include_most or "elementary functions" in libraries:
+        from .._backends import _symbolic_router
+
+        new_functions = {
+            name: getattr(_symbolic_router, name) for name in _ELEMENTARY_LABELS
+        }
+        new_functions = {relabeling_map.get(k, k): v for k, v in new_functions.items()}
+        working_namespace().update(new_functions)
+        configured_by_library["elementary functions"] = list(new_functions)
+
     if include_all or "abbreviations" in libraries:
         from ...core.vector_fields_and_differential_forms import (
             coordinate_differential_form,
@@ -643,7 +675,7 @@ def configure_convenient_labels(
     if not to_print:
         return
 
-    engine = dgcv_settings_registry.get("default_symbolic_engine", "dgcv_custom")
+    engine = dgcv_settings_registry.get("default_symbolic_engine", "builtin")
 
     bullets = "\n".join(
         f"  • For {lib}: {', '.join(funcs)}"

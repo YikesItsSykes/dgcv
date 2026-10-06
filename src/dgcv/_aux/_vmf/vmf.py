@@ -37,6 +37,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 
 from .._backends._display_engine import is_rich_displaying_available
+from .._backends._engine import notify_vmf_cleared
 from .._backends._types_and_constants import is_atomic
 from .._utilities._config import (
     dgcv_warning,
@@ -294,7 +295,7 @@ def _clearVar_single(label):
         del registry[branch][label]
         cleared_info = ("algebra", label)
 
-    elif branch == "eds" and path[1] == "atoms":
+    elif branch == "eds" and path[2] == "atoms":
         system_dict = registry["eds"]["atoms"][label]
         family_names = system_dict["family_names"]
         if isinstance(family_names, str):
@@ -306,17 +307,23 @@ def _clearVar_single(label):
             global_vars.pop(var, None)
             paths.pop(var, None)
         global_vars.pop(label, None)
+        from ..printing.printing._eds import conjugation_prefix
+
+        global_vars.pop(f"{conjugation_prefix()}{label}", None)
         paths.pop(label, None)
+        if system_dict.get("tempVar"):
+            registry["temporary_variables"].discard(label)
         del registry["eds"]["atoms"][label]
         cleared_info = ("DFAtom", label)
 
-    elif branch == "eds" and path[1] == "coframes":
+    elif branch == "eds" and path[2] == "coframes":
         coframe_info = registry["eds"]["coframes"][label]
         cousins_parent = coframe_info.get("cousins_parent")
+        children = tuple(coframe_info.get("children", ()) or ())
         global_vars.pop(label, None)
         paths.pop(label, None)
         del registry["eds"]["coframes"][label]
-        cleared_info = ("coframe", (label, cousins_parent))
+        cleared_info = ("coframe", (label, cousins_parent, children))
 
     registry["_labels"].pop(label, None)
 
@@ -360,11 +367,13 @@ def clearVar(*labels, report=True):
                 cleared_diffFormAtoms.append(cleared_label)
 
         elif system_type == "coframe":
-            coframe_label, cousins_system_label = cleared_label
+            coframe_label, cousins_system_label, children = cleared_label
             if ("coframe", coframe_label) not in seen:
                 seen.add(("coframe", coframe_label))
                 cleared_coframes.append((coframe_label, cousins_system_label))
-                clearVar(cousins_system_label, report=False)
+                clearVar(*children, report=False)
+                if cousins_system_label is not None:
+                    clearVar(cousins_system_label, report=False)
 
     if report:
         if cleared_standard:
@@ -385,9 +394,14 @@ def clearVar(*labels, report=True):
             )
         if cleared_coframes:
             for cf_label, cp_label in cleared_coframes:
-                print(
-                    f"Cleared coframe '{cf_label}' along with associated zero form atom system '{cp_label}'"
-                )
+                if cp_label is None:
+                    print(f"Cleared coframe '{cf_label}' along with its 1-forms")
+                else:
+                    print(
+                        f"Cleared coframe '{cf_label}' along with its 1-forms and the zero form atom system '{cp_label}'"
+                    )
+    if seen:
+        notify_vmf_cleared()
 
 
 def clear_vmf(
@@ -465,6 +479,101 @@ def clear_vmf(
 # -----------------------------------------------------------------------------
 # look up
 # -----------------------------------------------------------------------------
+
+
+def _eds_lookup(
+    registry,
+    p,
+    kind,
+    obj,
+    path,
+    relatives,
+    flattened_relatives,
+    system_index,
+    differential_system,
+):
+    system_label = p[1]
+    section = p[2]
+    name = p[3] if len(p) > 3 else None
+    eds = registry.get("eds", {})
+
+    if section == "coframes":
+        info = eds.get("coframes", {}).get(system_label, {})
+        coframe = info.get("coframe")
+        out = {"type": "coframe", "sub_type": "coframe"}
+        if path:
+            out["path"] = ("eds", system_label, "coframes")
+        if relatives:
+            forms = tuple(getattr(coframe, "forms", ()) or ())
+            out["relatives"] = {
+                "system_label": system_label,
+                "forms": forms,
+                "structure_coefficients": tuple(info.get("cousins_vals") or ()),
+                "structure_coefficient_system": info.get("cousins_parent"),
+                "children": tuple(info.get("children") or ()),
+            }
+            if flattened_relatives:
+                out["flattened_relatives"] = forms
+        if system_index:
+            out["system_index"] = None
+        if differential_system:
+            out["differential_system"] = None
+        return out
+
+    info = eds.get("atoms", {}).get(system_label, {})
+    base_kind = (
+        "differential_form"
+        if str(kind).startswith("differential_form")
+        else "zero_form"
+    )
+    out = {"type": base_kind}
+    if name is None:
+        out["sub_type"] = "system"
+    elif info.get("real"):
+        out["sub_type"] = "real"
+    elif str(kind).endswith("_conjugate"):
+        out["sub_type"] = "conjugate"
+    else:
+        out["sub_type"] = "primary"
+    if path:
+        out["path"] = tuple(p)
+    if relatives:
+        family_values = tuple(info.get("family_values") or ())
+        pair = info.get("family_relatives", {}).get(name) if name else None
+        conjugate = None
+        if pair is not None:
+            conjugate = pair[1] if out["sub_type"] == "primary" else pair[0]
+        coframes = eds.get("coframes", {})
+        out["relatives"] = {
+            "system_label": system_label,
+            "family": family_values,
+            "conjugates": tuple(info.get("conjugates", {}).values()),
+            "conjugate": conjugate,
+            "coframe": info.get("primary_coframe"),
+            "is_structure_coefficient": any(
+                cf.get("cousins_parent") == system_label for cf in coframes.values()
+            ),
+            "degree": info.get("degree"),
+        }
+        if flattened_relatives:
+            out["flattened_relatives"] = family_values + tuple(
+                info.get("conjugates", {}).values()
+            )
+    if system_index:
+        family_names = tuple(info.get("family_names") or ())
+        out["system_index"] = family_names.index(name) if name in family_names else None
+    if differential_system:
+        order = getattr(obj, "differential_order", 0) if obj is not None else 0
+        if order:
+            out["differential_system"] = {
+                "coframe": getattr(obj, "coframe", None),
+                "order": order,
+            }
+        else:
+            out["differential_system"] = None
+    return out
+
+
 def vmf_lookup(
     obj: any,
     *,
@@ -622,16 +731,67 @@ def vmf_lookup(
                 out["differential_system"] = None
             return out
 
+        if branch == "eds":
+            return _eds_lookup(
+                registry,
+                p,
+                entry.get("kind"),
+                None,
+                path,
+                relatives,
+                flattened_relatives,
+                system_index,
+                differential_system,
+            )
+
         out = {"type": branch, "sub_type": branch}
         if path:
             out["path"] = (branch, system_label)
         if relatives:
-            out["system_index"] = None
+            out["relatives"] = _rel_empty()
+            if flattened_relatives:
+                out["flattened_relatives"] = tuple()
         if system_index:
             out["system_index"] = None
         if differential_system:
             out["differential_system"] = None
         return out
+
+    from ._safeguards import get_dgcv_category
+
+    category = get_dgcv_category(obj)
+    if category in ("zeroFormAtom", "abstDFAtom"):
+        entry = paths.get(getattr(obj, "label", None))
+        p = entry.get("path") if isinstance(entry, dict) else None
+        if _is_path_tuple(p) and p[0] == "eds":
+            return _eds_lookup(
+                registry,
+                p,
+                entry.get("kind"),
+                obj,
+                path,
+                relatives,
+                flattened_relatives,
+                system_index,
+                differential_system,
+            )
+        if not is_atomic(obj):
+            return _out_unregistered()
+    elif category == "abst_coframe":
+        for coframe_label, info in registry.get("eds", {}).get("coframes", {}).items():
+            if info.get("coframe") is obj:
+                return _eds_lookup(
+                    registry,
+                    ("eds", coframe_label, "coframes"),
+                    "coframe",
+                    obj,
+                    path,
+                    relatives,
+                    flattened_relatives,
+                    system_index,
+                    differential_system,
+                )
+        return _out_unregistered()
 
     if not is_atomic(obj):
         return _out_unregistered()
