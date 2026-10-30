@@ -28,6 +28,10 @@ from ..format_support import (
     _external_library_algebra_processing,
     _validate_structure_data,
 )
+from ..format_support.lazy_basis import (
+    mints_registered_basis,
+    mints_unregistered_basis,
+)
 from ..linear_algebra import _structure_array
 from ..specialized import simple_Lie_algebra
 
@@ -49,6 +53,7 @@ def createAlgebra(
     special_processing_rules: dict = None,
     return_created_object: bool = False,
     forgo_vmf_registry: bool = False,
+    mint_basis: bool | None = None,
     simplify_products_by_default: bool = None,
     initial_basis_index=1,
     allow_natural_basis_reordering: bool | None = None,
@@ -244,6 +249,7 @@ def createAlgebra(
         obj = obj[0]
         if basis_labels is None:
             basis_labels = [str(x) for x in basis_order_for_supplied_str_eqns]
+    explicit_basis_labels = isinstance(basis_labels, (list, tuple))
 
     if isinstance(obj, numbers.Integral) and obj >= 0:
         structure_data = _structure_array(dict(), obj)
@@ -479,6 +485,12 @@ def createAlgebra(
         raise ValueError(
             f"Grading must be a single vector or a list of vectors. Recieved {grading}"
         ) from None
+    if forgo_vmf_registry is not False:
+        mint = mints_unregistered_basis() if mint_basis is None else bool(mint_basis)
+    elif explicit_basis_labels:
+        mint = True
+    else:
+        mint = mints_registered_basis(dimension, mint_basis)
     if isinstance(_simple, dict) and _simple.get("lockKey", None) == passkey:
         algebra_obj = simple_Lie_algebra(
             structure_data=structure_data,
@@ -486,11 +498,14 @@ def createAlgebra(
             base_field=base_field,
             process_matrix_rep=process_matrix_rep,
             preferred_representation=preferred_representation,
+            matrix_representation=matrix_representation,
+            tensor_representation=tensor_representation,
             _label=label,
             _basis_labels=basis_labels,
             _calledFromCreator=passkey,
             _simple_data=_simple,
             _basis_labels_parent=_basis_labels_parent,
+            _mint_basis=mint,
         )
     else:
         if _markers.get("lockKey", None) == passkey:
@@ -502,6 +517,7 @@ def createAlgebra(
             }
         else:
             _markers = {"parameters": _markers.get("parameters", set())}
+        _markers["mint_basis"] = mint
         algebra_obj = algebra_class(
             structure_data=structure_data,
             grading=grading,
@@ -520,7 +536,8 @@ def createAlgebra(
 
     if forgo_vmf_registry is False:
         update_working_namespace({label: algebra_obj})
-        update_working_namespace(zip(basis_labels, algebra_obj.basis))
+        if mint:
+            update_working_namespace(zip(basis_labels, algebra_obj.basis))
 
         variable_registry = get_variable_registry()
         paths = variable_registry.get("paths", None)
@@ -531,8 +548,9 @@ def createAlgebra(
 
         variable_registry["finite_algebra_systems"][label] = {
             "family_type": "algebra",
-            "family_names": tuple(basis_labels),
-            "family_values": tuple(algebra_obj.basis),
+            "family_names": tuple(basis_labels) if mint else (),
+            "family_values": tuple(algebra_obj.basis) if mint else algebra_obj.basis,
+            "basis_minted": mint,
             "dimension": dimension,
             "grading": grading,
             "basis_labels": basis_labels,
@@ -540,7 +558,7 @@ def createAlgebra(
         }
         variable_registry["_labels"][label] = {
             "path": ("finite_algebra_systems", label),
-            "children": set(basis_labels),
+            "children": set(basis_labels) if mint else set(),
         }
 
     if verbose:

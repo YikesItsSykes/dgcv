@@ -18,9 +18,14 @@ from ._generic import GenericConstants
 from ._linalg import eigen_data, generic_det, projector_eigenspaces
 from ._linsolve import builtin_build_and_solve
 from ._normal_form import RF, nf_from_base, rf_number
-from ._polynomials import poly_terms, primitive_factors
+from ._polynomials import complex_poly_terms, linear_form, poly_terms, primitive_factors
 from ._probes import basis_pick
-from ._secondary import integrate, secondary_kind, solve_with_secondary
+from ._secondary import (
+    groebner_with_secondary,
+    integrate,
+    secondary_kind,
+    solve_with_secondary,
+)
 from ._span_field import span_field
 from ._vector_fields import _apply_dependence, _builtin_apply, _builtin_apply_complex
 
@@ -71,6 +76,7 @@ dgcv_capabilities = {
     "linsolve": builtin_build_and_solve,
     "secondary_kind": secondary_kind,
     "solve_secondary": solve_with_secondary,
+    "groebner": groebner_with_secondary,
     "eigen_data": eigen_data,
     "generic_det": generic_det,
     "projector_eigenspaces": projector_eigenspaces,
@@ -82,6 +88,8 @@ dgcv_capabilities = {
     "apply_dependence": _apply_dependence,
     "linear_one_hot": _bindings.linear_one_hot,
     "poly_terms": poly_terms,
+    "complex_poly_terms": complex_poly_terms,
+    "linear_form": linear_form,
     "primitive_factors": primitive_factors,
     "function_head": FunctionHead,
     "generic_constants": GenericConstants,

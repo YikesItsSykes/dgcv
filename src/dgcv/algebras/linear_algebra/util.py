@@ -223,6 +223,27 @@ def _generate_gl_structure_data(vs):
     )
 
 
+def _semidirect_structure_data(domain, space, action_columns, include_space=True):
+    dom_dim = domain.dimension
+    amb_dim = dom_dim + space.dimension
+    columns = {}
+    for k, v in getattr(domain, "structureDataDict", {}).items():
+        columns.setdefault((k[0], k[1]), {})[k[2]] = v
+    if include_space:
+        for k, v in getattr(space, "structureDataDict", {}).items():
+            columns.setdefault((k[0] + dom_dim, k[1] + dom_dim), {})[k[2] + dom_dim] = v
+    for j, c, column in action_columns:
+        shifted = {idx + dom_dim: value for idx, value in column.items()}
+        columns[(j, c + dom_dim)] = shifted
+        columns[(c + dom_dim, j)] = {idx: -value for idx, value in shifted.items()}
+    out = matrix_dgcv(
+        {}, shape=(amb_dim, amb_dim), null_return=matrix_dgcv({}, shape=(amb_dim, 1))
+    )
+    for key, column in columns.items():
+        out[key] = matrix_dgcv(column, shape=(amb_dim, 1))
+    return out
+
+
 class linear_representation(dgcv_class):
     def __init__(target_alg, hom: homomorphism):
         target_alg.structureData, target_alg.antihomomorphism, params = (
@@ -273,14 +294,9 @@ class linear_representation(dgcv_class):
         if anti is None:
             anti = False
 
-        columns = dict()
-        for k, v in getattr(hom.domain, "structureDataDict", dict()).items():
-            columns.setdefault((k[0], k[1]), dict())[k[2]] = v
-        for k, v in getattr(hom.codomain.domain, "structureDataDict", dict()).items():
-            columns.setdefault((k[0] + dom_dim, k[1] + dom_dim), dict())[
-                k[2] + dom_dim
-            ] = v
-        if not is_zero_map:
+        def action_columns():
+            if is_zero_map:
+                return
             for j in range(dom_dim):
                 action = hom(hom.domain.basis[j])
                 if not callable(action):
@@ -290,25 +306,16 @@ class linear_representation(dgcv_class):
                     if _scalar_is_zero(image):
                         continue
                     column = {
-                        idx + dom_dim: value
+                        idx: value
                         for idx, value in image.coeff_dict.items()
                         if not _scalar_is_zero(value)
                     }
-                    if not column:
-                        continue
-                    columns[(j, k + dom_dim)] = column
-                    columns[(k + dom_dim, j)] = {
-                        idx: -value for idx, value in column.items()
-                    }
+                    if column:
+                        yield j, k, column
 
-        out_sd = matrix_dgcv(
-            dict(),
-            shape=(amb_dim, amb_dim),
-            null_return=matrix_dgcv({}, shape=(amb_dim, 1)),
+        out_sd = _semidirect_structure_data(
+            hom.domain, hom.codomain.domain, action_columns()
         )
-        for key, column in columns.items():
-            out_sd[key] = matrix_dgcv(column, shape=(amb_dim, 1))
-
         return out_sd, anti, params
 
     def semidirect_sum(
@@ -403,7 +410,7 @@ class linear_representation(dgcv_class):
         )
         _markers["_parameters"] = target_alg._parameters
         if register_in_vmf is True:
-            from ..subspaces import createAlgebra
+            from ..creators import createAlgebra
 
             return createAlgebra(
                 target_alg.structureData,

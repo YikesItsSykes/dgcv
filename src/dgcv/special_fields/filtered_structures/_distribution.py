@@ -23,7 +23,7 @@ from ..._aux._vmf._safeguards import (
 )
 from ..._aux._vmf.vmf import order_coordinates
 from ...algebras import algebra_class, createAlgebra
-from ...algebras.threads.util import _span_solver
+from ...algebras.threads.util import _span_fraction, _span_solver
 from ...core.base import dgcv_class
 from ...core.conversions.conversions import allToReal, allToSym, symToHol
 from ...core.dgcv_core import tensor_field_class, wedge
@@ -96,7 +96,7 @@ class _flag_span:
             return True
         if all(_scalar_is_zero(v) for v in image.values()):
             return False
-        symbolic = any(exact_fraction(v) is None for v in image.values())
+        symbolic = any(_span_fraction(v) is None for v in image.values())
         if self.num is None:
             solver = _span_solver.build_from_vectors([image], force_symbolic=symbolic)
             if solver is None:

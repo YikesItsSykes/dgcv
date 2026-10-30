@@ -146,9 +146,11 @@ def _builtin_apply_complex(vf, other):
         return None
     consts = _wirtinger_consts
     if not consts:
-        consts["half"] = rf_number(Fraction(1, 2))
-        consts["i"] = RF(_poly.p_gen(_poly.I_GEN), canonical=True)
-        consts["zero"] = RF({}, canonical=True)
+        consts.update(
+            half=rf_number(Fraction(1, 2)),
+            i=RF(_poly.p_gen(_poly.I_GEN), canonical=True),
+            zero=RF({}, canonical=True),
+        )
 
     half = consts["half"]
     imu = consts["i"]

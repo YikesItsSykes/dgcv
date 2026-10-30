@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..._aux._backends._engine import engine_capability
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._polynomials import (
     expr_union_primitives,
 )
@@ -25,7 +26,6 @@ from ..._aux._vmf._safeguards import (
 )
 from ..._aux._vmf.vmf import clearVar, listVar, order_coordinates, vmf_lookup
 from ...core.arrays import freeze_matrix, matrix_dgcv
-from ..aec import algebra_element_class
 from ...core.conversions.conversions import cleanUpConjugation
 from ...core.solvers import solve_dgcv
 from .heating import _timed_progress_call
@@ -239,8 +239,8 @@ def _check_jacobi_identity(target_alg):
             for k in range(dim)
             if (i, j) in rows or (j, k) in rows or (k, i) in rows
         )
-    fail_list = []
-    for i, j, k in triples:
+    def _fails(ijk):
+        i, j, k = ijk
         acc = dict()
         for a, b, c in ((i, j, k), (j, k, i), (k, i, j)):
             left = rows.get((a, b))
@@ -257,8 +257,15 @@ def _check_jacobi_identity(target_alg):
                 continue
             if get_free_symbols(expr) and _scalar_is_zero(simplify(expr)):
                 continue
-            fail_list.append((i, j, k))
-            break
+            return True
+        return False
+
+    triples = list(triples)
+    fail_list = [
+        t
+        for t, bad in zip(triples, parallel_map("jacobi_check", _fails, triples, min_items=256))
+        if bad
+    ]
     if fail_list:
         return False, fail_list
     return True, None
@@ -793,15 +800,16 @@ def _derived_algebra(target_alg, lazy):
         return _cache_derived_algebra(target_alg, None, False)
     if lazy and target_alg._derived_subalg_cache is not None:
         return target_alg._derived_subalg_cache
-    commutators = []
     basis = target_alg.basis
     dim = len(basis)
     skew = target_alg.is_skew_symmetric()
-    for j in range(dim):
-        el1 = basis[j]
-        lIdx = j + 1 if skew else 0
-        for k in range(lIdx, dim):
-            commutators.append(el1 * basis[k])
+    pairs = [(j, k) for j in range(dim) for k in range(j + 1 if skew else 0, dim)]
+    commutators = parallel_map(
+        "derived_products",
+        lambda jk: basis[jk[0]] * basis[jk[1]],
+        pairs,
+        min_items=64,
+    )
     return _cache_derived_algebra(target_alg, commutators, lazy)
 
 
@@ -857,6 +865,24 @@ def _align_extending(old_level, new_level, discrep, force_heavy_solve=False):
     return new_level
 
 
+def _derived_first_level(target_alg, scoped_basis):
+    cached = target_alg._derived_series_cache
+    if not isinstance(cached, tuple) or cached[1] is not False:
+        return None
+    if getattr(target_alg, "_derived_series_heavy", False):
+        return None
+    series = cached[0]
+    if (
+        len(series) < 2
+        or not isinstance(series[0], list)
+        or not isinstance(series[1], list)
+        or len(series[0]) != len(scoped_basis)
+        or any(a is not b for a, b in zip(series[0], scoped_basis))
+    ):
+        return None
+    return list(series[1])
+
+
 def lower_central_series(
     target_alg,
     max_depth=None,
@@ -887,14 +913,28 @@ def lower_central_series(
         for _ in range(requested_depth):
             series.append(current_basis)
 
-            lower_central = []
-            for el1 in current_basis:
-                for el2 in scoped_basis:
-                    commutator = el1 * el2
-                    lower_central.append(commutator)
-            independent_generators = scope.filter_independent_elements(
-                lower_central, apply_light_basis_simplification=True
-            )
+            independent_generators = None
+            first = current_basis is scoped_basis
+            if first:
+                independent_generators = _derived_first_level(target_alg, scoped_basis)
+            if independent_generators is None:
+                if first and target_alg.is_skew_symmetric():
+                    pairs = [
+                        (scoped_basis[count], scoped_basis[idx2])
+                        for count in range(len(scoped_basis))
+                        for idx2 in range(count + 1, len(scoped_basis))
+                    ]
+                else:
+                    pairs = [(el1, el2) for el1 in current_basis for el2 in scoped_basis]
+                lower_central = parallel_map(
+                    "derived_products",
+                    lambda pair: pair[0] * pair[1],
+                    pairs,
+                    min_items=64,
+                )
+                independent_generators = scope.filter_independent_elements(
+                    lower_central, apply_light_basis_simplification=True
+                )
             if len(independent_generators) == 0:
                 if len(scoped_basis) > 0:
                     series.append([])
@@ -997,13 +1037,19 @@ def derived_series(
         for _ in range(requested_depth):
             series.append(list(current_basis))
 
-            derived = []
             level_len = len(current_basis)
-            for count in range(level_len):
-                el1 = current_basis[count]
-                start = count + 1 if target_alg.is_skew_symmetric() else 0
-                for idx2 in range(start, level_len):
-                    derived.append(el1 * current_basis[idx2])
+            skew = target_alg.is_skew_symmetric()
+            level = current_basis
+            derived = parallel_map(
+                "derived_products",
+                lambda pair: level[pair[0]] * level[pair[1]],
+                [
+                    (count, idx2)
+                    for count in range(level_len)
+                    for idx2 in range(count + 1 if skew else 0, level_len)
+                ],
+                min_items=64,
+            )
             out = scope.filter_independent_elements(
                 derived,
                 apply_light_basis_simplification=True,
@@ -1165,7 +1211,7 @@ def radical(
                 parts = linear_one_hot(genSol.coeff_dict, freeVars)
                 if parts is not None:
                     radSpanners = [
-                        algebra_element_class(genSol.algebra, part, genSol.valence)
+                        genSol.algebra._class_builder(part, genSol.valence)
                         for part in parts
                     ]
             if radSpanners is None:

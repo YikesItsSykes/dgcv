@@ -739,16 +739,33 @@ def exact_fraction(value):
         return Fraction(value)
     if isinstance(value, Fraction):
         return value
+    hook = getattr(type(value), "__dgcv_exact_fraction__", None)
+    if hook is not None:
+        return hook(value)
     if isinstance(value, numbers.Rational):
+        num = value.numerator
+        den = value.denominator
         try:
-            return Fraction(int(value.numerator), int(value.denominator))
+            if callable(num):
+                num, den = num(), den()
+            return Fraction(int(num), int(den))
         except Exception:
             return None
+    pyobject = getattr(value, "pyobject", None)
+    if callable(pyobject):
+        try:
+            inner = pyobject()
+        except Exception:
+            return None
+        return None if inner is value else exact_fraction(inner)
     num = getattr(value, "numerator", None)
     den = getattr(value, "denominator", None)
     if callable(num) and callable(den):
         try:
-            return Fraction(int(num()), int(den()))
+            n, d = num(), den()
+            ni, di = int(n), int(d)
+            if ni == n and di == d:
+                return Fraction(ni, di)
         except Exception:
             return None
     return None

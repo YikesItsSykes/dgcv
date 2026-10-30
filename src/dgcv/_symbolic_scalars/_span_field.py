@@ -1143,6 +1143,7 @@ class _FactoredElement:
 
 class _SpanField:
     __slots__ = ("one",)
+    thread_safe = True
 
     def __init__(self):
         self.one = _nf(1)
@@ -1215,6 +1216,7 @@ span_field = _SpanField()
 
 
 class _FactoredSpanField:
+    thread_safe = False
     __slots__ = ("one", "table")
 
     def __init__(self, width=16):

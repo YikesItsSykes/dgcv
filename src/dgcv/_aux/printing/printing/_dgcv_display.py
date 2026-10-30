@@ -88,6 +88,13 @@ def LaTeX(obj: Any, removeBARs: bool | None = None, verbose: bool = False) -> st
         if x is None:
             return ""
 
+        if isinstance(x, (list, tuple)) and type(x) not in (list, tuple):
+            f = getattr(x, "_repr_latex_", None)
+            if callable(f):
+                s = f()
+                if isinstance(s, str):
+                    return _unwrap_math_delims(s)
+
         if isinstance(x, list):
             elems = [_strip_display_dollars(_latex_of(e)) for e in x]
             return r"\left[ " + ", ".join(elems) + r" \right]"

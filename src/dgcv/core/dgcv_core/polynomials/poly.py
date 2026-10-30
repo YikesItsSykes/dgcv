@@ -226,9 +226,15 @@ class polynomial_dgcv(dgcv_class):
     def degree(self) -> Optional[int]:
         if self._degree is None:
             try:
-                self._degree = poly_total_degree(
-                    self.polyExpr, self.coordinates, parameters=self.parameters
-                )
+                if engine_kind() == "sympy":
+                    self._degree = poly_total_degree(
+                        self.polyExpr, self.coordinates, parameters=self.parameters
+                    )
+                else:
+                    monoms = poly_monoms(self.poly_obj_unformatted)
+                    self._degree = max(
+                        (sum(int(e) for e in m) for m in monoms), default=0
+                    )
             except Exception:
                 self._degree = None
         return self._degree

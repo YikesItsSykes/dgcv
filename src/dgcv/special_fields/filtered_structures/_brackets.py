@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from ..._aux._backends._engine import engine_kind
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     is_zero_knowing_zero_is_expected,
 )
-from ..._aux._backends._types_and_constants import _disposable_symbols
+from ..._aux._backends._parallel import parallel_map
+from ..._aux._backends._types_and_constants import _disposable_symbols, exact_fraction
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import create_key
 from ...algebras import _extract_basis
@@ -20,10 +22,27 @@ def _column_vector(column):
     return column
 
 
+def _sequential_map(site, fn, items, **kwargs):
+    return [fn(x) for x in items]
+
+
 def _sparse_row(vec):
     if isinstance(vec, dict):
         return vec
     return {i: c for i, c in enumerate(vec) if not _scalar_is_zero(c)}
+
+
+def _plain_number(v):
+    fr = exact_fraction(v)
+    if fr is None:
+        return v
+    if fr.denominator == 1:
+        return fr.numerator
+    return fr
+
+
+def _plain_row(row):
+    return {k: _plain_number(v) for k, v in row.items()}
 
 
 class _symbol_brackets:
@@ -313,8 +332,26 @@ class _symbol_brackets:
             decomp[entry] = decomp.get(entry, 0) + v
         return {k: v for k, v in decomp.items() if not _scalar_is_zero(v)}
 
+    def _plain_scalars(self):
+        return engine_kind() == "builtin" and not self._parameters
+
+    def _generator_coords(self, neg_coords):
+        table = self._GLA_generators
+        if table is None:
+            try:
+                table = self.GLA_generators
+            except Exception:
+                return neg_coords
+        generators = table.get("generators") if isinstance(table, dict) else None
+        if not generators:
+            return neg_coords
+        ids = {id(elem) for level in generators.values() for elem in level}
+        coords = [c for c in neg_coords if id(self.levels[c[0]][c[1]]) in ids]
+        return coords if coords else neg_coords
+
     def _mixed_action_table(self, neg_positions, neg_coords, try_hard=False):
         table = dict()
+        plain = self._plain_scalars()
         for weight, level in self.levels.items():
             if weight < 0:
                 continue
@@ -336,7 +373,10 @@ class _symbol_brackets:
                         vec[kidx] = vec.get(kidx, 0) + c
                     if rows is not None:
                         rows = {
-                            coord: {r: vec[r] for r in sorted(vec)}
+                            coord: {
+                                r: _plain_number(vec[r]) if plain else vec[r]
+                                for r in sorted(vec)
+                            }
                             for coord, vec in rows.items()
                         }
                 if rows is None:
@@ -350,7 +390,9 @@ class _symbol_brackets:
                         )
                         if vec is None:
                             return None
-                        rows[coord] = _sparse_row(vec)
+                        rows[coord] = (
+                            _plain_row(_sparse_row(vec)) if plain else _sparse_row(vec)
+                        )
                 for coord in neg_coords:
                     if coord not in rows:
                         rows[coord] = dict()
@@ -391,7 +433,16 @@ class _symbol_brackets:
         return columns
 
     def _jacobi_bracket(
-        self, first, second, total, neg_coords, columns, action, memo, try_hard=False
+        self,
+        first,
+        second,
+        total,
+        neg_coords,
+        columns,
+        action,
+        memo,
+        try_hard=False,
+        solver=None,
     ):
         rhs = dict()
         offset = 0
@@ -414,7 +465,8 @@ class _symbol_brackets:
             if all(is_zero_knowing_zero_is_expected(c) for c in rhs.values()):
                 return dict()
             return None
-        solver = _prepared_span(columns, _column_vector)
+        if solver is None:
+            solver = _prepared_span(columns, _column_vector)
         if solver is not None:
             coords = solver.reduce_vector(rhs)
             if coords is not None:
@@ -447,12 +499,19 @@ class _symbol_brackets:
         nonneg = [w for w in self.levels if w >= 0 and len(self.levels[w]) > 0]
         if len(nonneg) == 0:
             return memo
+        plain = self._plain_scalars()
+        solve_coords = neg_coords
+        if getattr(self, "_nonneg_validated", False) and not self._parameters:
+            solve_coords = self._generator_coords(neg_coords)
         for total in range(2 * max(nonneg) + 1):
             columns = None
+            coords = solve_coords
+            solver = None
             if total % 2 == 0:
                 half = total // 2
                 for s in range(len(self.levels[half])):
                     memo[((half, s), (half, s))] = dict()
+            pairs = []
             for w1 in range(total // 2 + 1):
                 w2 = total - w1
                 L1, L2 = self.levels[w1], self.levels[w2]
@@ -462,29 +521,49 @@ class _symbol_brackets:
                     for s2 in range(len(L2)):
                         if w1 == w2 and s2 <= s1:
                             continue
-                        if total <= jacobi_threshold:
-                            vec = self._decompose_in_level(
-                                L1[s1] * L2[s2], total, neg_positions, try_hard
-                            )
-                            if vec is not None:
-                                vec = _sparse_row(vec)
-                        else:
-                            if columns is None:
-                                columns = self._action_columns(
-                                    total, neg_coords, action
-                                )
-                            vec = self._jacobi_bracket(
-                                (w1, s1),
-                                (w2, s2),
-                                total,
-                                neg_coords,
-                                columns,
-                                action,
-                                memo,
-                                try_hard,
-                            )
-                        if vec is None:
-                            return None
-                        memo[((w1, s1), (w2, s2))] = vec
-                        memo[((w2, s2), (w1, s1))] = {r: -c for r, c in vec.items()}
+                        pairs.append((w1, s1, w2, s2))
+            if not pairs:
+                continue
+            jacobi = total > jacobi_threshold
+            mapper = parallel_map
+            if jacobi:
+                columns = self._action_columns(total, coords, action)
+                solver = _prepared_span(columns, _column_vector) if columns else None
+                if columns and solver is None and coords is not neg_coords:
+                    coords = neg_coords
+                    columns = self._action_columns(total, coords, action)
+                    solver = _prepared_span(columns, _column_vector)
+                if solver is not None and not solver.thread_safe:
+                    mapper = _sequential_map
+
+            def _one(pair):
+                w1, s1, w2, s2 = pair
+                if not jacobi:
+                    vec = self._decompose_in_level(
+                        self.levels[w1][s1] * self.levels[w2][s2],
+                        total,
+                        neg_positions,
+                        try_hard,
+                    )
+                    if vec is None:
+                        return None
+                    return _plain_row(_sparse_row(vec)) if plain else _sparse_row(vec)
+                return self._jacobi_bracket(
+                    (w1, s1),
+                    (w2, s2),
+                    total,
+                    coords,
+                    columns,
+                    action,
+                    memo,
+                    try_hard,
+                    solver,
+                )
+
+            for pair, vec in zip(pairs, mapper("bracket_memo", _one, pairs, min_items=16)):
+                if vec is None:
+                    return None
+                w1, s1, w2, s2 = pair
+                memo[((w1, s1), (w2, s2))] = vec
+                memo[((w2, s2), (w1, s1))] = {r: -c for r, c in vec.items()}
         return memo

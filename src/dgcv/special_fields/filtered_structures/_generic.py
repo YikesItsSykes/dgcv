@@ -6,6 +6,7 @@ from ..._aux._backends._engine import engine_capability, engine_kind
 from ..._aux._backends._symbolic_router import _scalar_is_zero
 from ..._aux._utilities._config import get_dgcv_settings_registry
 from ..._aux._vmf._safeguards import create_key, get_dgcv_category
+from ...algebras.linear_algebra import _flatten_structure_data
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ._tensor_products import _fast_tensor_products
 
@@ -77,11 +78,17 @@ class _symbol_generic_constants:
     def _generic_structure(self, record):
         alg = self.negativePart
         original = alg.structureData
+        original_dict = alg.structureDataDict
+        original_rows = alg._structure_rows_cache
         alg.structureData = record.structure_data
+        alg.structureDataDict = _flatten_structure_data(record.structure_data)
+        alg._structure_rows_cache = None
         try:
             yield record
         finally:
             alg.structureData = original
+            alg.structureDataDict = original_dict
+            alg._structure_rows_cache = original_rows
 
     def _generic_test_commutators(self, record):
         if record.commutators is None:

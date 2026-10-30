@@ -9,12 +9,13 @@ from ..._aux._vmf._safeguards import create_key, retrieve_passkey, unique_label
 from ...core.arrays import matrix_dgcv
 from ...core.dgcv_core.spaces.spaces import _vs_card
 from ...core.tensors import tensorProduct
-from ..aec import algebra_element_class
 from ..linear_algebra import (
     _flatten_structure_data,
     _gather_structure_singularities,
     _structure_array,
 )
+from .lazy_basis import lazy_basis as _lazy_basis
+from .lazy_basis import mints_unregistered_basis
 from .validation import _validate_structure_data
 
 
@@ -196,6 +197,7 @@ def _alg_init(
     target_alg.structureDataDict = _flatten_structure_data(
         target_alg.structureData, _source="algebra_class"
     )
+    target_alg._structure_rows_cache = None
     if _calledFromCreator == retrieve_passkey():
         target_alg.base_field = _markers.get("base_field", base_field)
     else:
@@ -245,7 +247,10 @@ def _alg_init(
 
         return tuple(vector)
 
-    if grading is None:
+    lazy_grading = _markers.get("lazy_grading")
+    if lazy_grading is not None:
+        target_alg.grading = list(lazy_grading)
+    elif grading is None:
         target_alg.grading = [tuple([0] * target_alg.dimension)]
     else:
         if isinstance(grading, (list, tuple)) and all(
@@ -320,19 +325,26 @@ def _alg_init(
         target_alg._tensor_rep = None
 
     target_alg.card = _vs_card(target_alg)
-    target_alg.basis = tuple(
-        [
-            algebra_element_class(
-                target_alg,
-                [1 if i == j else 0 for j in range(target_alg.dimension)],
-                1,
-            )
-            for i in range(target_alg.dimension)
-        ]
-    )
+    lazy_basis = _markers.get("lazy_basis")
+    if lazy_basis is None:
+        mint = _markers.get("mint_basis")
+        if mint is None:
+            mint = mints_unregistered_basis()
+        if not mint:
+            lazy_basis = _lazy_basis
+    if lazy_basis is not None:
+        target_alg.basis = lazy_basis(target_alg)
+    else:
+        target_alg.basis = tuple(
+            target_alg._class_builder({i: 1}, 1) for i in range(target_alg.dimension)
+        )
 
     target_alg._basis_labels = tuple(_basis_labels) if _basis_labels else None
-    target_alg._grading = tuple(map(tuple, target_alg.grading))
+    target_alg._grading = (
+        tuple(target_alg.grading)
+        if lazy_grading is not None
+        else tuple(map(tuple, target_alg.grading))
+    )
 
     target_alg._skew_symmetric_cache = None
     target_alg._jacobi_identity_cache = None
@@ -359,5 +371,5 @@ def _alg_init(
     target_alg._Levi_deco_cache = None
     target_alg._graded_components = None
     target_alg._endomorphisms = None
-    target_alg._coproduct = {idx: None for idx in range(target_alg.dimension)}
+    target_alg._coproduct = {}
     target_alg._structure_data_profile = None

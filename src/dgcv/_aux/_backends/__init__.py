@@ -23,6 +23,7 @@ SPDX-License-Identifier: Apache-2.0
 # calculus-like operations
 from ._calculus import diff as diff_dgcv
 from ._calculus import integrate as integrate_dgcv
+from ._groebner import groebner as groebner_dgcv
 
 # expression/router operations
 from ._symbolic_router import (
@@ -65,6 +66,7 @@ __all__ = [
     "expand_dgcv",
     "factor_dgcv",
     "get_free_symbols",
+    "groebner_dgcv",
     "ilcm",
     "im",
     "re",

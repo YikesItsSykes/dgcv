@@ -51,6 +51,7 @@ from .._aux._backends._types_and_constants import (
     OP_POW,
     OP_SYMBOL,
     e_constant,
+    exact_fraction,
     expr_numeric_types,
     expr_operands,
     expr_types,
@@ -741,6 +742,39 @@ class zero_form_class(dgcv_class):
             return self._nf.equal(other._nf)
         return _bases_equal(self.base, other.base)
 
+    def __dgcv_exact_fraction__(self):
+        if _builtin():
+            return _nf_hooks["exact_fraction"](self)
+        return None
+
+    def as_integer_ratio(self):
+        fr = self.__dgcv_exact_fraction__()
+        if fr is None:
+            raise TypeError(f"{self} is not a rational number")
+        return fr.numerator, fr.denominator
+
+    def __index__(self):
+        fr = self.__dgcv_exact_fraction__()
+        if fr is None or fr.denominator != 1:
+            raise TypeError(f"{self} is not an integer")
+        return fr.numerator
+
+    def __mod__(self, other):
+        a = self.__dgcv_exact_fraction__()
+        b = exact_fraction(other)
+        if a is None or b is None:
+            return NotImplemented
+        r = a % b
+        return r.numerator if r.denominator == 1 else r
+
+    def __rmod__(self, other):
+        a = exact_fraction(other)
+        b = self.__dgcv_exact_fraction__()
+        if a is None or b is None:
+            return NotImplemented
+        r = a % b
+        return r.numerator if r.denominator == 1 else r
+
     def sort_key(self, order=None):
         return (4, self.base)  # some tedious details here... perhaps remove
 
@@ -1069,9 +1103,11 @@ class zero_form_class(dgcv_class):
 
         return NotImplemented
 
-    def _eval_simplify(self, try_hard=False, **kwargs):
+    def _eval_simplify(self, try_hard=False, reflect_conjugation=False, **kwargs):
         if _builtin():
             out = self._builtin_simplify()
+            if reflect_conjugation:
+                out = _nf_hooks["reflect_conjugation"](out)
             if try_hard:
                 out = out._secondary_simplify_if_transcendental()
             return out

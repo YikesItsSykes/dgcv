@@ -4,6 +4,7 @@ from contextlib import nullcontext
 
 from ..._aux._backends._engine import engine_capability
 from ..._aux._backends._polynomials import expr_union_primitives
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols, subs
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._utilities._misc import linear_combination
@@ -202,7 +203,38 @@ class _symbol_prolongation_step:
                 test_commutators = self._generic_test_commutators(generic)
             else:
                 test_commutators = self.test_commutators
-            for triple in test_commutators:
+            test_commutators = list(test_commutators)
+            if test_commutators:
+                heads = {}
+                tails = {}
+                for triple in test_commutators:
+                    heads.setdefault(id(triple[0]), triple[0])
+                    heads.setdefault(id(triple[1]), triple[1])
+                    t2 = triple[2]
+                    if not (get_dgcv_category(t2) == "algebra_element" and not t2.coeff_dict):
+                        tails.setdefault(id(t2), t2)
+                head_list = [t for t in heads.values() if id(t) not in expansions]
+                for t, out in zip(
+                    head_list,
+                    parallel_map(
+                        "prolong_commutators",
+                        lambda t: self._aliased_expansion(general_elem * t, partial=True),
+                        head_list,
+                        min_items=8,
+                    ),
+                ):
+                    products.setdefault(id(t), general_elem * t)
+                    expansions[id(t)] = out
+                tail_list = [t for t in tails.values() if id(t) not in products]
+                for t, out in zip(
+                    tail_list,
+                    parallel_map(
+                        "prolong_commutators", lambda t: general_elem * t, tail_list, min_items=8
+                    ),
+                ):
+                    products[id(t)] = out
+
+            def _commutator(triple):
                 t0, t1, t2 = triple[0], triple[1], triple[2]
                 a = _ge_expansion(t0) * t1
                 b = t0 * _ge_expansion(t1)
@@ -210,7 +242,12 @@ class _symbol_prolongation_step:
                     p2 = 0
                 else:
                     p2 = _ge_product(t2)
-                _accumulate(_loop_sum(a, b, p2))
+                return _loop_sum(a, b, p2)
+
+            for value in parallel_map(
+                "prolong_commutators", _commutator, test_commutators, min_items=32
+            ):
+                _accumulate(value)
 
             if eqns == [0] or eqns == []:
                 solution = [{}]

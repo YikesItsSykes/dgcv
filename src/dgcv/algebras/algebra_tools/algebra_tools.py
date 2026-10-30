@@ -317,7 +317,7 @@ def intersection(*args) -> list:
         if f_alg is None:
             return []
         if alg is None:
-            alg == f_alg
+            alg = f_alg
         elif alg != f_alg:
             return []
     if len(factors) == 0:

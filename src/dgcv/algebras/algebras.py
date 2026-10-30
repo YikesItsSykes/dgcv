@@ -4,7 +4,6 @@ import numbers
 from typing import List, Literal, Optional
 
 from .._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols, subs
-from .._aux._backends._types_and_constants import expr_numeric_types
 from .._aux._utilities._config import (
     dgcv_warning,
     get_dgcv_settings_registry,
@@ -771,7 +770,7 @@ class algebra_class(_algebra_methods, dgcv_class):
             "base_field": self.base_field,
         }
         if register_in_vmf is True:
-            from .subspaces import createAlgebra
+            from .creators import createAlgebra
 
             return createAlgebra(
                 sd,
@@ -821,7 +820,7 @@ class algebra_class(_algebra_methods, dgcv_class):
         simplify_products_by_default=None,
         build_all_gradings=False,
     ):
-        tensor_product(
+        return tensor_product(
             self,
             other,
             grading=grading,
@@ -839,8 +838,6 @@ class algebra_class(_algebra_methods, dgcv_class):
     def __rmatmul__(self, other):
         if _scalar_is_zero(other):
             return algebra_class({})
-        if isinstance(other, expr_numeric_types()):
-            return self._convert_to_tp().__rmatmul__(other)
         return NotImplemented
 
     def dual(self, invert_grad_weights=True):

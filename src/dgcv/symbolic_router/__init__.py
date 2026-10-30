@@ -16,6 +16,7 @@ SPDX-License-Identifier: Apache-2.0
 
 from .._aux._backends._calculus import diff, integrate
 from .._aux._backends._exact_arith import exact_reciprocal, factorial
+from .._aux._backends._groebner import groebner
 from .._aux._backends._symbolic_router import (
     _scalar_is_minus_one as is_scalar_minus_one,
 )
@@ -119,6 +120,7 @@ __all__ = [
     "factorial",
     "gcd",
     "get_free_symbols",
+    "groebner",
     "half",
     "ilcm",
     "im",

@@ -158,6 +158,9 @@ def invalidate_engine_cache():
     _engine_module = None
     _capabilities = None
     notify_vmf_cleared()
+    mod = sys.modules.get("dgcv._aux._backends._parallel")
+    if mod is not None:
+        mod.drop_pool()
 
     try:
         from ._types_and_constants import invalidate_types_and_constants_cache

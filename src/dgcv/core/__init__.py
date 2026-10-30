@@ -29,7 +29,7 @@ from .arrays import (
     frozen_matrix_dgcv,
     matrix_dgcv,
 )
-from .combinatorics import Baker_Campbell_Hausdorff
+from .combinatorics import Baker_Campbell_Hausdorff, permSign
 from .conversions import (
     allToHol,
     allToReal,
@@ -145,6 +145,7 @@ __all__ = [
     "matrix_dgcv",
     "monomialWeight",
     "multi_tensor_product",
+    "permSign",
     "polynomial_dgcv",
     "re_with_hol_coor",
     "re_with_real_coor",

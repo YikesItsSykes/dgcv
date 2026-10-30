@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..._aux._backends._polynomials import expr_union_primitives
+from ..._aux._backends._parallel import parallel_map_until
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     get_free_symbols,
@@ -273,6 +274,27 @@ def is_subspace_subalgebra(
         return_structure_data = False
     solver = _span_solver.build(filtered_elem)
     fast = None if solver is None else _closure_product_data(target_alg, filtered_elem)
+    precomputed = None
+    if fast is not None and solver.thread_safe:
+        pairs = [
+            (count, j)
+            for count in range(new_dim)
+            for j in range(count + 1 if skew else 0, new_dim)
+        ]
+        precomputed = dict(
+            zip(
+                pairs,
+                parallel_map_until(
+                    "closure_products",
+                    lambda cj: solver.reduce_sparse(_closure_product(fast, cj[0], cj[1])),
+                    pairs,
+                    lambda fc: fc is not None and fc[0],
+                    min_items=64,
+                ),
+            )
+        )
+        if surface_singularities:
+            sing += solver._singularities()
     for count, elem in enumerate(filtered_elem):
         if closed_under_product is False:
             break
@@ -281,12 +303,16 @@ def is_subspace_subalgebra(
             if closed_under_product is False:
                 break
             if fast is not None:
-                fc = solver.reduce_sparse(
-                    _closure_product(fast, count, j),
-                    surface_singularities=surface_singularities,
-                )
+                if precomputed is not None:
+                    fc = precomputed.get((count, j))
+                    new_sing = []
+                else:
+                    fc = solver.reduce_sparse(
+                        _closure_product(fast, count, j),
+                        surface_singularities=surface_singularities,
+                    )
                 if fc is not None:
-                    residual, coeffs, new_sing = fc
+                    residual, coeffs, new_sing = (fc[0], fc[1], new_sing) if precomputed is not None else fc
                     if surface_singularities:
                         sing += new_sing
                     if residual:
@@ -393,7 +419,7 @@ def is_ideal(self, subspace_elements, assume_basis=False):
             products = [el * other] if skew else [el * other, other * el]
             for product in products:
                 if assume_basis:
-                    if wedge(product, b_product).is_zero:
+                    if not wedge(product, b_product).is_zero:
                         return False
                 else:
                     if not self.is_in_span(

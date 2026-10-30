@@ -89,7 +89,7 @@ class algebra_element_class(dgcv_class):
         return hash((self.algebra, self._coeffs_hash, self.valence, self.is_sparse))
 
     def _class_builder(self, coeff_dict, valence, format_sparse=False):
-        return algebra_element_class(
+        return self.__class__(
             self.algebra, coeff_dict, valence, format_sparse=format_sparse
         )
 
@@ -254,28 +254,28 @@ class algebra_element_class(dgcv_class):
 
     def subs(self, subsData):
         newCoeffs = {idx: subs(j, subsData) for idx, j in self.coeff_dict.items()}
-        return algebra_element_class(self.algebra, newCoeffs, self.valence)
+        return self.__class__(self.algebra, newCoeffs, self.valence)
 
     @property
     def ambient_rep(self):
         return self
 
     def __dgcv_simplify__(self, *args, **kwargs):
-        return algebra_element_class(
+        return self.__class__(
             self.algebra,
             {idx: simplify(j, **kwargs) for idx, j in self.coeff_dict.items()},
             self.valence,
         )
 
     def _eval_simplify(self, *args, **kwargs):
-        return algebra_element_class(
+        return self.__class__(
             self.algebra,
             {idx: simplify(j, **kwargs) for idx, j in self.coeff_dict.items()},
             self.valence,
         )
 
     def dual(self):
-        return algebra_element_class(
+        return self.__class__(
             self.algebra,
             self.coeff_dict,
             (self.valence + 1) % 2,
@@ -307,7 +307,7 @@ class algebra_element_class(dgcv_class):
         new_dict = dict(self.coeff_dict)
         for k, v in other.coeff_dict.items():
             new_dict[k] = new_dict.get(k, 0) + v
-        return algebra_element_class(
+        return self.__class__(
             self.algebra,
             new_dict,
             self.valence,
@@ -401,7 +401,7 @@ class algebra_element_class(dgcv_class):
                 new_dict = dict(self.coeff_dict)
                 for k, v in other.coeff_dict.items():
                     new_dict[k] = new_dict.get(k, 0) + v
-                return algebra_element_class(
+                return self.__class__(
                     self.algebra,
                     new_dict,
                     self.valence,
@@ -437,7 +437,7 @@ class algebra_element_class(dgcv_class):
                 new_dict = dict(self.coeff_dict)
                 for k, v in other.coeff_dict.items():
                     new_dict[k] = new_dict.get(k, 0) - v
-                return algebra_element_class(
+                return self.__class__(
                     self.algebra,
                     new_dict,
                     self.valence,
@@ -470,12 +470,12 @@ class algebra_element_class(dgcv_class):
             if self.algebra == other.algebra and self.valence == other.valence:
                 sign = 1 if self.valence == 1 else -1
                 alg = self.algebra
-                struct = alg.structureData
+                rows = alg._structure_rows
                 spbd = self.algebra.simplify_products_by_default
                 new_coeffs = dict()
                 for idx1, c1 in self.coeff_dict.items():
                     for idx2, c2 in other.coeff_dict.items():
-                        data = struct[idx1, idx2]._data
+                        data = rows.get((idx1, idx2))
                         if not data:
                             continue
                         scalar = sign * c1 * c2
@@ -484,7 +484,7 @@ class algebra_element_class(dgcv_class):
                                 self._si_wrap(scalar * c3) if spbd else scalar * c3
                             )
 
-                return algebra_element_class(
+                return self.__class__(
                     self.algebra,
                     new_coeffs,
                     self.valence,
@@ -497,7 +497,7 @@ class algebra_element_class(dgcv_class):
             new_coeffs = {
                 idx: self._si_wrap(j * other) for idx, j in self.coeff_dict.items()
             }
-            return algebra_element_class(self.algebra, new_coeffs, self.valence)
+            return self.__class__(self.algebra, new_coeffs, self.valence)
         return NotImplemented
 
     def __rmul__(self, other):

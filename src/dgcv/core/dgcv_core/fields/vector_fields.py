@@ -4,6 +4,7 @@ from math import prod
 from numbers import Integral
 from typing import Optional
 
+from ...._aux._backends._parallel import parallel_map
 from ...._aux._backends._calculus import diff
 from ...._aux._backends._display import latex as _backend_latex
 from ...._aux._backends._engine import engine_capability
@@ -238,11 +239,11 @@ class vector_field_class(tensor_field_class):
             def f(c):
                 return simplify(c, **kwargs)
 
+        items = [(k, v) for k, v in self.coeff_dict.items() if not _scalar_is_zero(v)]
         cd = {}
-        for k, v in self.coeff_dict.items():
-            if _scalar_is_zero(v):
-                continue
-            nv = f(v)
+        for (k, _), nv in zip(
+            items, parallel_map("coefficient_map", f, [v for _, v in items], min_items=16)
+        ):
             if not _scalar_is_zero(nv):
                 cd[k] = cd.get(k, 0) + nv
 

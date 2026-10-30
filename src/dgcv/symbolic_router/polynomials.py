@@ -14,6 +14,7 @@ Licensed under the Apache License, Version 2.0
 SPDX-License-Identifier: Apache-2.0
 """
 
+from .._aux._backends._groebner import groebner
 from .._aux._backends._polynomials import (
     discriminant,
     extract_polynomial_coeffs,
@@ -30,6 +31,7 @@ from .._aux._backends._polynomials import (
 __all__ = [
     "discriminant",
     "extract_polynomial_coeffs",
+    "groebner",
     "is_polynomial",
     "make_poly",
     "poly_coeffs",

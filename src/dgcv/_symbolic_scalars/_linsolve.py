@@ -4,6 +4,7 @@
 
 import contextlib
 import math
+import threading
 from fractions import Fraction
 from typing import NamedTuple, Optional
 
@@ -31,18 +32,17 @@ _SEEN_LIMIT = 64
 _CACHE_LIMIT = 8
 _TRANSFORM_AFTER = 2
 _NO_TRANSFORM = -1
-_pivot_guard = None
+_pivot_state = threading.local()
 
 
 @contextlib.contextmanager
 def pivot_guard(guard):
-    global _pivot_guard
-    previous = _pivot_guard
-    _pivot_guard = guard
+    previous = getattr(_pivot_state, "guard", None)
+    _pivot_state.guard = guard
     try:
         yield guard
     finally:
-        _pivot_guard = previous
+        _pivot_state.guard = previous
 
 
 def _leaf_of(v):
@@ -169,7 +169,7 @@ def _sparse_rref(rows, n_cols):
     order = list(range(len(work)))
     pivots = []
     pivot_polys = []
-    guard = _pivot_guard
+    guard = getattr(_pivot_state, "guard", None)
     r = 0
 
     for col in range(n_cols):
@@ -411,7 +411,7 @@ def _sparse_rref_factored(rows, n_cols):
     pos_of = list(range(len(work)))
     pivots = []
     pivot_polys = []
-    guard = _pivot_guard
+    guard = getattr(_pivot_state, "guard", None)
     r = 0
 
     for col in range(n_cols):
@@ -560,7 +560,200 @@ def _symbolic_rref(rows, n_cols, key=None):
     return _sparse_rref(rows, n_cols)
 
 
+_RECON_PRIMES = ((1 << 61) - 1, (1 << 89) - 1, (1 << 107) - 1, (1 << 127) - 1)
+
+
+def _row_blocks(rows):
+    parent = {}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for i, row in enumerate(rows):
+        key = ("r", i)
+        parent[key] = key
+        for j in row:
+            if isinstance(j, int):
+                if j not in parent:
+                    parent[j] = j
+                ra, rb = find(key), find(j)
+                if ra != rb:
+                    parent[rb] = ra
+    groups = {}
+    for i in range(len(rows)):
+        groups.setdefault(find(("r", i)), []).append(i)
+    return list(groups.values())
+
+
+def _rational_reconstruct(a, m, bound):
+    r0, r1 = m, a % m
+    s0, s1 = 0, 1
+    while r1 > bound:
+        q = r0 // r1
+        r0, r1 = r1, r0 - q * r1
+        s0, s1 = s1, s0 - q * s1
+    if s1 == 0 or abs(s1) > bound:
+        return None
+    if s1 < 0:
+        r1, s1 = -r1, -s1
+    if math.gcd(r1, s1) != 1:
+        return None
+    return Fraction(r1, s1)
+
+
+def _mod_eliminate(scaled, n_cols, p):
+    work = []
+    for row in scaled:
+        reduced = {}
+        for j, v in row.items():
+            v %= p
+            if v:
+                reduced[j] = v
+        work.append(reduced)
+    holders = {}
+    for i, row in enumerate(work):
+        for j in row:
+            holders.setdefault(j, set()).add(i)
+    pivots = []
+    pivot_rows = []
+    used = set()
+    for col in range(n_cols):
+        hold = holders.get(col)
+        if not hold:
+            continue
+        pick = None
+        best = None
+        for i in hold:
+            if i in used:
+                continue
+            size = len(work[i])
+            if best is None or size < best or (size == best and i < pick):
+                best = size
+                pick = i
+        if pick is None:
+            continue
+        prow = work[pick]
+        inv = pow(prow[col], p - 2, p)
+        for j in prow:
+            prow[j] = prow[j] * inv % p
+        for i in list(hold):
+            if i == pick:
+                continue
+            row = work[i]
+            f = row.get(col)
+            if not f:
+                continue
+            for j, b in prow.items():
+                v = (row.get(j, 0) - f * b) % p
+                if v:
+                    if j not in row:
+                        holders.setdefault(j, set()).add(i)
+                    row[j] = v
+                elif j in row:
+                    del row[j]
+                    holders[j].discard(i)
+        used.add(pick)
+        pivots.append(col)
+        pivot_rows.append(pick)
+    for i, row in enumerate(work):
+        if i not in used and row:
+            return None
+    return pivots, [work[i] for i in pivot_rows]
+
+
+def _reconstruct_rref(combined, pivots, modulus, scaled):
+    bound = math.isqrt((modulus - 1) // 2)
+    out = []
+    for row in combined:
+        rec = {}
+        for j, v in row.items():
+            q = _rational_reconstruct(v, modulus, bound)
+            if q is None:
+                return None
+            rec[j] = q
+        out.append(rec)
+    index = {col: k for k, col in enumerate(pivots)}
+    for row in scaled:
+        rest = {j: Fraction(v) for j, v in row.items()}
+        for col in [j for j in rest if j in index]:
+            f = rest.get(col)
+            if not f:
+                continue
+            for j, b in out[index[col]].items():
+                v = rest.get(j, 0) - f * b
+                if v:
+                    rest[j] = v
+                else:
+                    rest.pop(j, None)
+        if rest:
+            return None
+    return out
+
+
+def _modular_rref(rows, n_cols):
+    scaled = []
+    for row in rows:
+        lcm = 1
+        for v in row.values():
+            lcm = lcm * v.denominator // math.gcd(lcm, v.denominator)
+        scaled.append({j: int(v * lcm) for j, v in row.items() if v})
+    modulus = 1
+    combined = None
+    pivots = None
+    for p in _RECON_PRIMES:
+        res = _mod_eliminate(scaled, n_cols, p)
+        if res is None:
+            return None
+        new_pivots, prows = res
+        if pivots is None or len(new_pivots) > len(pivots):
+            pivots, combined, modulus = new_pivots, [dict(r) for r in prows], p
+        elif new_pivots == pivots:
+            inv = pow(modulus, -1, p)
+            merged = []
+            for a, b in zip(combined, prows):
+                d = {}
+                for j in set(a) | set(b):
+                    x = a.get(j, 0)
+                    d[j] = x + modulus * (((b.get(j, 0) - x) * inv) % p)
+                merged.append(d)
+            combined, modulus = merged, modulus * p
+        else:
+            continue
+        out = _reconstruct_rref(combined, pivots, modulus, scaled)
+        if out is not None:
+            return out + [{} for _ in range(len(rows) - len(pivots))], pivots
+    return None
+
+
+def _numeric_rref_block(rows, n_cols):
+    out = _modular_rref(rows, n_cols)
+    if out is not None:
+        return out
+    return _numeric_rref_exact(rows, n_cols)
+
+
 def _numeric_rref(rows, n_cols):
+    if any(not isinstance(j, int) and row[j] for row in rows for j in row):
+        return _numeric_rref_exact(rows, n_cols)
+    blocks = _row_blocks(rows)
+    if len(blocks) <= 1:
+        return _numeric_rref_block(rows, n_cols)
+    pivot_rows = []
+    rest = []
+    for block in blocks:
+        work, pivots = _numeric_rref_block([rows[i] for i in block], n_cols)
+        pivot_rows.extend(zip(pivots, work[: len(pivots)]))
+        rest.extend(work[len(pivots) :])
+    pivot_rows.sort(key=lambda item: item[0])
+    return [row for _, row in pivot_rows] + rest, [col for col, _ in pivot_rows]
+
+
+def _numeric_rref_exact(rows, n_cols):
     m = len(rows)
     work = [dict(r) for r in rows]
     holders = {}
@@ -782,8 +975,9 @@ def builtin_build_and_solve(eqns, vars_, return_divisors):
         return (dict(zip(vars_, sol)), [])
     signature, coeff_rows, rhs_rows = _canonical_rows(rows)
     key = (signature, n_cols, numeric)
-    seen = _remember(key) if _pivot_guard is None else 0
-    prepared = _transform_cache.get(key) if _pivot_guard is None else None
+    unguarded = getattr(_pivot_state, "guard", None) is None
+    seen = _remember(key) if unguarded else 0
+    prepared = _transform_cache.get(key) if unguarded else None
     divisors = []
     if numeric:
         if prepared is None and seen > _TRANSFORM_AFTER:

@@ -103,6 +103,10 @@ def _sympy_leaf(sp, symbol_map, e):
 
 
 def _sympy_function_head(sp, e):
+    label = getattr(getattr(e, "func", None), "_dgcv_label", None)
+    if label is not None:
+        derivs = getattr(e.func, "_dgcv_derivs", None)
+        return label, e.args, list(derivs) if derivs else None
     AppliedUndef = sp.core.function.AppliedUndef
     if isinstance(e, AppliedUndef):
         return e.func.__name__, e.args, None

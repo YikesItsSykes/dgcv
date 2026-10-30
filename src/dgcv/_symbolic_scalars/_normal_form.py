@@ -405,7 +405,9 @@ class RF:
                 continue
             leaf = _poly.gen_leaf(g)
             if isinstance(leaf, _CompoundLeaf):
-                if not _mentions(leaf, target):
+                if not getattr(leaf, "conjugated", False) and not _mentions(
+                    leaf, target
+                ):
                     continue
                 inner = RF({}, canonical=True)
                 for pk, arg in leaf.partials():
@@ -937,24 +939,35 @@ def _collapse_poly(poly, mix):
     return _eval_poly(poly, power, mix)
 
 
+def _conj_image(g):
+    leaf = _poly.gen_leaf(g)
+    if isinstance(leaf, zero_form_atom):
+        image = leaf._eval_conjugate()
+        if image == leaf:
+            return _poly.SELF_CONJUGATE
+        return rf_gen(image)
+    if isinstance(leaf, _CompoundLeaf):
+        return leaf.conj_rf()
+    raise NotImplementedError(
+        f"dgcv's builtin symbolic engine cannot conjugate through `{leaf.label}`"
+    )
+
+
 def conj_rf(rf):
+    base = RF(_conj_i(rf.num), _conj_i(rf.den), canonical=True)
+    if not rf.kinds() & _poly.K_MOVES:
+        return base
+    kind = _poly.GEN_KIND
+    table = _poly.GEN_CONJ
     mapping = {}
     for g in rf.gens():
-        if g == _poly.I_GEN:
+        if not kind[g] & _poly.K_MOVES:
             continue
-        leaf = _poly.gen_leaf(g)
-        if isinstance(leaf, zero_form_atom):
-            image = leaf._eval_conjugate()
-            if image != leaf:
-                mapping[g] = rf_gen(image)
-        elif isinstance(leaf, _CompoundLeaf):
-            mapping[g] = leaf.conj_rf()
-        elif isinstance(leaf, OpaqueLeaf):
-            raise NotImplementedError(
-                f"dgcv's builtin symbolic engine cannot conjugate through `{leaf.label}`"
-            )
-
-    base = RF(_conj_i(rf.num), _conj_i(rf.den), canonical=True)
+        image = table[g]
+        if image is None:
+            image = table[g] = _conj_image(g)
+        if image is not _poly.SELF_CONJUGATE:
+            mapping[g] = image
     return rf_map_gens(base, mapping)
 
 

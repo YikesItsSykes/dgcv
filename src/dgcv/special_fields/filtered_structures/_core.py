@@ -4,6 +4,7 @@ import numbers
 from collections.abc import Iterable
 
 from ..._aux._backends._polynomials import expr_union_primitives
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     as_numer_denom,
@@ -433,6 +434,7 @@ class _symbol_core:
         self.negativePart = subspace
         self.ambientGLA = GLA
         self.assume_FGLA = assume_FGLA
+        self._nonneg_validated = _validated == retrieve_passkey()
         negWeights = sorted([j for j in set(primary_grading) if j < 0])
         self.negWeights = tuple(negWeights)
         if isinstance(nonnegParts, dict):
@@ -573,19 +575,29 @@ class _symbol_core:
                 w_level_triples = []
                 brackets = self.ambientGLA.subspace()
                 candidates = []
+                factor_pairs = []
                 for idx1 in range(-1, w // 2 - 1, -1):
                     idx2 = w - idx1
                     for c1, eT1 in enumerate(self._GLA_generators["map"].get(idx1, [])):
                         newC = c1 + 1 if idx1 == idx2 else 0
                         for eT2 in self._GLA_generators["map"].get(idx2, [])[newC:]:
-                            tuple1, e1, dep1 = eT1
-                            tuple2, e2, dep2 = eT2
-                            dep3 = max(dep1, dep2) + 1
-                            eProd = e1 * e2
-                            elem_weight[id(eProd)] = w
-                            if dep3 == 2:
-                                w_level_triples.append((tuple1, tuple2, eProd))
-                            candidates.append((tuple1, tuple2, eProd, dep3))
+                            factor_pairs.append((eT1, eT2))
+                for (eT1, eT2), eProd in zip(
+                    factor_pairs,
+                    parallel_map(
+                        "gla_candidates",
+                        lambda fp: fp[0][1] * fp[1][1],
+                        factor_pairs,
+                        min_items=64,
+                    ),
+                ):
+                    tuple1, e1, dep1 = eT1
+                    tuple2, e2, dep2 = eT2
+                    dep3 = max(dep1, dep2) + 1
+                    elem_weight[id(eProd)] = w
+                    if dep3 == 2:
+                        w_level_triples.append((tuple1, tuple2, eProd))
+                    candidates.append((tuple1, tuple2, eProd, dep3))
                 candidates.sort(key=_one_hot_first)
                 for tuple1, tuple2, eProd, dep3 in candidates:
                     d1 = brackets.dimension

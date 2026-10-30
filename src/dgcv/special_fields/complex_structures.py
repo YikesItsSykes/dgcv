@@ -274,6 +274,7 @@ class KahlerStructure(dgcv_class):
         if variable_inference_behavior not in ("max", "min"):
             raise TypeError("variable_inference_behavior must be 'min' or 'max'.")
 
+        self._manual_varSpace = None
         if varSpace is None:
             if variable_inference_behavior == "min":
                 min_any = tuple(omega.infer_minimal_varSpace())
@@ -289,6 +290,7 @@ class KahlerStructure(dgcv_class):
             vs_real = tuple(omega.infer_varSpace(formatting="real"))
         else:
             holo_only = _coerce_manual_varSpace_holo_only(varSpace)
+            self._manual_varSpace = holo_only
             vs_complex = _expand_holo_varSpace(holo_only, formatting="complex")
             vs_real = _expand_holo_varSpace(holo_only, formatting="real")
             min_any = tuple(omega.infer_minimal_varSpace())
@@ -380,6 +382,28 @@ class KahlerStructure(dgcv_class):
 
         self._dgcv_class_check = retrieve_passkey()
         self._dgcv_category = "kahler_structure"
+
+    def _to_real(self, plan=None):
+        return self._to_format("real", plan)
+
+    def _to_complex(self, plan=None):
+        return self._to_format("complex", plan)
+
+    def _to_format(self, formatting, plan=None):
+        if self.formatting == formatting:
+            return self
+        if isinstance(plan, dict) and (
+            plan.get("skipVar") or plan.get("variables_scope")
+        ):
+            raise ValueError(
+                "Kahler structure conversion does not support skipVar or variables_scope"
+            )
+        return KahlerStructure(
+            self.kahlerForm,
+            varSpace=self._manual_varSpace,
+            variable_inference_behavior=self.variable_inference_behavior,
+            formatting=formatting,
+        )
 
     @staticmethod
     def _vf_from_coord(a: Any):

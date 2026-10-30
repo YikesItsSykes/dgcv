@@ -91,9 +91,13 @@ class _NFPrinter:
         for g, e in present.items():
             leaf = self.leaves[g]
             q = getattr(leaf, "q", None)
-            if q is None or not isinstance(leaf.args[0], zero_form_atom):
+            if (
+                q is None
+                or leaf.conjugated
+                or not isinstance(leaf.args[0], zero_form_atom)
+            ):
                 continue
-            atom_gid = _poly.gen_id(leaf.args[0])
+            atom_gid = _poly.known_gen_id(leaf.args[0])
             if atom_gid in present and atom_gid not in merged:
                 merged[atom_gid] = (present[atom_gid] * q + e, q)
                 merged[g] = None

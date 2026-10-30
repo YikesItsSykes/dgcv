@@ -20,6 +20,7 @@ from ._functions import (
 from ._normal_form import (
     RF,
     _value_from_rf,
+    conj_rf,
     rf_gen,
     rf_map_gens,
     rf_number,
@@ -39,13 +40,18 @@ def _transform(rf, rule):
         if isinstance(leaf, ElementaryFunction):
             old = leaf._arg_rf()
             arg = _transform(old, rule)
-            out = rule(leaf.name, arg)
-            if out is None and arg is not old:
-                out = elementary(leaf.name, arg)
+            if leaf.conjugated:
+                out = conj_rf(elementary(leaf.name, arg)) if arg is not old else None
+            else:
+                out = rule(leaf.name, arg)
+                if out is None and arg is not old:
+                    out = elementary(leaf.name, arg)
         elif isinstance(leaf, Radical):
             old = leaf._arg_rf()
             arg = _transform(old, rule)
             out = radical(arg, leaf.q) if arg is not old else None
+            if out is not None and leaf.conjugated:
+                out = conj_rf(out)
         else:
             continue
         if out is not None:
@@ -236,3 +242,33 @@ def simplify_tier(zf):
     if best is None:
         return None
     return zero_form_class._from_nf(best)
+
+
+def _reflected(rf):
+    mapping = {}
+    for g in rf.gens():
+        leaf = _poly.gen_leaf(g)
+        if not isinstance(leaf, (ElementaryFunction, Radical)):
+            continue
+        old = leaf._arg_rf()
+        arg = _reflected(old)
+        if leaf.conjugated:
+            arg = _reflected(conj_rf(arg))
+        elif arg is old:
+            continue
+        if isinstance(leaf, Radical):
+            mapping[g] = radical(arg, leaf.q)
+        else:
+            mapping[g] = elementary(leaf.name, arg)
+    return rf_map_gens(rf, mapping) if mapping else rf
+
+
+def reflect_conjugation(expr):
+    zf = to_active_engine(expr)
+    if not isinstance(zf, zero_form_class):
+        return zf
+    rf = zf._nf
+    if not rf.kinds() & _poly.K_CONJUGATED:
+        return zf
+    out = _reflected(rf)
+    return zf if out is rf else zero_form_class._from_nf(out)

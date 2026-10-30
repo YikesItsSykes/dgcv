@@ -4,6 +4,7 @@
 
 import math
 import random
+import threading
 from fractions import Fraction
 
 from ..eds._constants import I
@@ -19,9 +20,12 @@ K_INVERSE_CIRCULAR = 64
 K_INVERSE_HYPERBOLIC = 128
 K_RADICAL = 256
 K_FUNCTION = 512
+K_MOVES = 1024
 _gen_ids = {I: I_GEN}
 _gen_leaves = [I]
 GEN_KIND = [K_IMAGINARY]
+SELF_CONJUGATE = object()
+GEN_CONJ = [SELF_CONJUGATE]
 _GCD_TERM_BUDGET = 200000
 TRIAL_DIVISION_LIMIT = 10**12
 REDUCTIONS = {}
@@ -43,43 +47,48 @@ def leaf_kind(leaf):
 
 
 def refresh_kinds():
-    _kinds_stale[0] = False
-    GEN_KIND[1:] = [None] * (len(GEN_KIND) - 1)
+    with _registry_lock:
+        _kinds_stale[0] = False
+        GEN_KIND[1:] = [None] * (len(GEN_KIND) - 1)
+        GEN_CONJ[1:] = [None] * (len(GEN_CONJ) - 1)
 
 
 def register_reduction(gid, threshold, factory):
-    REDUCTIONS[gid] = (threshold, factory)
-    _REDUCIBLE.add(gid)
-    _RELATED.add(gid)
-
-
-def register_family(gid, family, arg, factory=None):
-    key = (family, arg)
-    grp = _group_ids.get(key)
-    if grp is None:
-        grp = _group_ids[key] = len(_group_ids)
-    GEN_GROUP[gid] = grp
-    if factory is not None:
-        _NAMED[gid] = factory
-        _MIXABLE.add(gid)
+    with _registry_lock:
+        REDUCTIONS[gid] = (threshold, factory)
+        _REDUCIBLE.add(gid)
         _RELATED.add(gid)
 
 
-def register_graded(gid, key, index, factory):
-    if gid in _GRADED:
-        return
-    _GRADED[gid] = (key, index, factory)
-    members = _graded_members.setdefault(key, [])
-    members.append(gid)
-    if len(members) > 1:
-        key = ("graded", key)
+def register_family(gid, family, arg, factory=None):
+    with _registry_lock:
+        key = (family, arg)
         grp = _group_ids.get(key)
         if grp is None:
             grp = _group_ids[key] = len(_group_ids)
-        for g in members:
-            GEN_GROUP[g] = grp
-            _MIXABLE.add(g)
-            _RELATED.add(g)
+        GEN_GROUP[gid] = grp
+        if factory is not None:
+            _NAMED[gid] = factory
+            _MIXABLE.add(gid)
+            _RELATED.add(gid)
+
+
+def register_graded(gid, key, index, factory):
+    with _registry_lock:
+        if gid in _GRADED:
+            return
+        _GRADED[gid] = (key, index, factory)
+        members = _graded_members.setdefault(key, [])
+        members.append(gid)
+        if len(members) > 1:
+            key = ("graded", key)
+            grp = _group_ids.get(key)
+            if grp is None:
+                grp = _group_ids[key] = len(_group_ids)
+            for g in members:
+                GEN_GROUP[g] = grp
+                _MIXABLE.add(g)
+                _RELATED.add(g)
 
 
 def p_mixture(num, den=None):
@@ -131,34 +140,50 @@ class GCDFailure(Exception):
 
 
 _GCD_WORK_BUDGET = 2000000
-_gcd_depth = 0
-_gcd_budget = 0
+
+
+class _GcdState(threading.local):
+    depth = 0
+    budget = 0
+
+
+_gcd_state = _GcdState()
+_registry_lock = threading.RLock()
 
 
 def _gcd_charge(units):
-    global _gcd_budget
-    if _gcd_depth:
-        _gcd_budget -= units
-        if _gcd_budget < 0:
+    state = _gcd_state
+    if state.depth:
+        state.budget -= units
+        if state.budget < 0:
             raise GCDFailure
 
 
 def gen_id(leaf):
     gid = _gen_ids.get(leaf)
-    if gid is None:
-        gid = len(_gen_leaves)
-        _gen_ids[leaf] = gid
-        _gen_leaves.append(leaf)
-        GEN_KIND.append(None)
-    elif _gen_leaves[gid] is not leaf and getattr(leaf, "coframe", None) is not None:
-        del _gen_ids[leaf]
-        _gen_ids[leaf] = gid
-        _gen_leaves[gid] = leaf
-    return gid
+    if gid is not None and _gen_leaves[gid] is leaf:
+        return gid
+    with _registry_lock:
+        gid = _gen_ids.get(leaf)
+        if gid is None:
+            gid = len(_gen_leaves)
+            _gen_ids[leaf] = gid
+            _gen_leaves.append(leaf)
+            GEN_KIND.append(None)
+            GEN_CONJ.append(None)
+        elif _gen_leaves[gid] is not leaf and getattr(leaf, "coframe", None) is not None:
+            del _gen_ids[leaf]
+            _gen_ids[leaf] = gid
+            _gen_leaves[gid] = leaf
+        return gid
 
 
 def gen_leaf(gid):
     return _gen_leaves[gid]
+
+
+def known_gen_id(leaf):
+    return _gen_ids.get(leaf)
 
 
 def p_const(c):
@@ -638,7 +663,14 @@ _COPRIME_I = pow(
     _COPRIME_PRIME,
 )
 _COPRIME_SEED = 24301
-_coprime_rng = random.Random(_COPRIME_SEED)
+
+
+class _CoprimeRandom(threading.local):
+    def __init__(self):
+        self.rng = random.Random(_COPRIME_SEED)
+
+
+_coprime_rng = _CoprimeRandom()
 
 
 def _univariate_images(p, xs, point, prime, inv, pw):
@@ -730,7 +762,7 @@ def _modular_gcd_degrees(p, q, gens, common=None):
     xs = [x for x in (gens if common is None else common) if x != I_GEN]
     if not xs:
         return {}
-    point = {g: _coprime_rng.randrange(2, prime - 1) for g in gens}
+    point = {g: _coprime_rng.rng.randrange(2, prime - 1) for g in gens}
     point[I_GEN] = _COPRIME_I
     inv = {x: pow(point[x], prime - 2, prime) for x in xs}
     pw = {}
@@ -850,7 +882,7 @@ def _heugcd(p, q, gens, gaussian=False):
 
 
 def p_gcd(p, q):
-    global _gcd_depth, _gcd_budget
+    state = _gcd_state
     if not p:
         return dict(q), True
     if not q:
@@ -916,10 +948,10 @@ def p_gcd(p, q):
 
             return p_mul(base, G, reduce_i=over_i), True
 
-    if _gcd_depth == 0:
-        _gcd_budget = _GCD_WORK_BUDGET
+    if state.depth == 0:
+        state.budget = _GCD_WORK_BUDGET
 
-    _gcd_depth += 1
+    state.depth += 1
     complete = True
     try:
         if gaussian:
@@ -937,7 +969,7 @@ def p_gcd(p, q):
     except GCDFailure:
         return base, False
     finally:
-        _gcd_depth -= 1
+        state.depth -= 1
 
     if p_is_const(G):
         return base, complete

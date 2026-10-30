@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ....._aux._backends._parallel import parallel_map
 from ....._aux._backends._symbolic_router import _scalar_is_zero, conjugate
 from ....._aux._backends._types_and_constants import imag_unit, rational
 from ....._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
@@ -204,9 +205,15 @@ class _tensor_field_formats:
         if not callable(func):
             raise TypeError("apply(func): `func` must be callable.")
 
+        items = list(self.coeff_dict.items())
+        values = parallel_map(
+            "coefficient_map",
+            lambda v: func(v, **func_kwargs),
+            [v for _, v in items],
+            min_items=16,
+        )
         out = {}
-        for k, v in self.coeff_dict.items():
-            vv = func(v, **func_kwargs)
+        for (k, _), vv in zip(items, values):
             if drop_zeros and _scalar_is_zero(vv):
                 continue
             out[k] = vv

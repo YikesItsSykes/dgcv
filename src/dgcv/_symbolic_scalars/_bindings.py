@@ -29,6 +29,7 @@ from ._normal_form import (
     _CompoundLeaf,
     _mentions,
     _split_i,
+    _value_from_rf,
     base_from_nf,
     collect_base,
     conj_rf,
@@ -150,7 +151,21 @@ def expand(zf):
     return zero_form_class._from_nf(zf._nf)
 
 
+def exact_fraction(zf):
+    rf = zf._nf
+    if not rf.is_constant:
+        return None
+    n = _poly.p_const_value(rf.num)
+    d = _poly.p_const_value(rf.den)
+    if type(n) in (int, Fraction) and type(d) in (int, Fraction):
+        return Fraction(n) / d
+    return None
+
+
 def numer_denom(zf):
+    fr = exact_fraction(zf)
+    if fr is not None:
+        return fr.numerator, fr.denominator
     n, d = zf._nf.numer_denom()
     return zero_form_class._from_nf(n), zero_form_class._from_nf(d)
 
@@ -403,7 +418,7 @@ def linear_one_hot(values, atoms):
         for d, g in zip(out, gids):
             num = _poly.p_add(const, parts[g]) if const else parts[g]
             if num:
-                d[key] = zero_form_class._from_nf(RF(num, rf.den))
+                d[key] = _value_from_rf(RF(num, rf.den))
 
     return out
 
@@ -467,6 +482,7 @@ _atoms_mod._nf_hooks.update(
     factor=factor,
     expand=expand,
     numer_denom=numer_denom,
+    exact_fraction=exact_fraction,
     collect=collect,
     diff=diff,
     re=re,
@@ -477,4 +493,5 @@ _atoms_mod._nf_hooks.update(
     subs=subs,
     msum=rf_msum,
     to_sympy=to_sympy,
+    reflect_conjugation=_rewrite.reflect_conjugation,
 )

@@ -760,6 +760,20 @@ def vmf_lookup(
     from ._safeguards import get_dgcv_category
 
     category = get_dgcv_category(obj)
+    if category == "abstract_ZF":
+        from ...eds._atoms import zero_form_atom
+
+        leaf = getattr(obj, "_base", None)
+        if not isinstance(leaf, zero_form_atom):
+            leaf = None
+            fs = obj.free_symbols
+            if len(fs) == 1:
+                cand = next(iter(fs))
+                if isinstance(cand, zero_form_atom) and obj == cand:
+                    leaf = cand
+        if leaf is not None:
+            obj = leaf
+            category = get_dgcv_category(obj)
     if category in ("zeroFormAtom", "abstDFAtom"):
         entry = paths.get(getattr(obj, "label", None))
         p = entry.get("path") if isinstance(entry, dict) else None
@@ -1345,15 +1359,17 @@ def _vmf_plain_snapshot_algebras(vr: dict) -> str:
         if dim is None:
             dim = (
                 len(family_values)
-                if isinstance(family_values, (list, tuple))
+                if isinstance(family_values, Sequence)
                 else (1 if family_values else None)
             )
 
         lines.append(f"  - {nm} ({_vmf_plain_fmt_dim(dim)})")
 
         basis = getattr(obj, "basis", None)
-        if not isinstance(basis, (list, tuple)) or not basis:
-            basis = family_values if isinstance(family_values, (list, tuple)) else ()
+        if not isinstance(basis, Sequence) or not basis:
+            basis = family_values if isinstance(family_values, Sequence) else ()
+        if not isinstance(basis, (list, tuple)) and len(basis) > 12:
+            basis = basis[:6] + ("...",) + basis[-6:]
         lines.append(f"      - basis: {_vmf_plain_fmt_span(basis, max_items=12)}")
 
         grading = getattr(obj, "grading", None)
@@ -1543,6 +1559,14 @@ def _snapshot_coor_(style=None, use_latex=None, slim=False, **kwargs):
                 return f"${s}$"
             return f"{obj_type}_{var_name}{start_index},...,{obj_type}_{var_name}{start_index + tuple_len - 1}"
 
+    def _singleton_latex(obj_type, name):
+        from ..printing.printing._string_processing import _process_var_label
+
+        sym = _process_var_label(name)
+        if obj_type == "D":
+            return f"$\\frac{{\\partial}}{{\\partial {sym}}}$"
+        return f"$\\operatorname{{d}} {sym}$"
+
     def build_object_string_for_complex(
         obj_type, family_houses, family_names, start_index, use_latex=False
     ):
@@ -1569,11 +1593,15 @@ def _snapshot_coor_(style=None, use_latex=None, slim=False, **kwargs):
                             f"{obj_type}_{part}{start_index},...,{obj_type}_{part}{start_index + len(part_names) - 1}"
                         )
                 else:
+                    name = (
+                        part_names[0]
+                        if isinstance(part_names, (list, tuple)) and part_names
+                        else part
+                    )
                     if use_latex:
-                        sym = _process_var_label(part)
-                        parts.append(f"${obj_type}_{sym}$")
+                        parts.append(_singleton_latex(obj_type, name))
                     else:
-                        parts.append(f"{obj_type}_{part}")
+                        parts.append(f"{obj_type}_{name}")
         else:
             if isinstance(family_names, (list, tuple)) and len(family_names) > 1:
                 if use_latex:
@@ -1591,11 +1619,15 @@ def _snapshot_coor_(style=None, use_latex=None, slim=False, **kwargs):
                         f"{obj_type}_{family_houses[0]}{start_index},...,{obj_type}_{family_houses[0]}{start_index + len(family_names) - 1}"
                     )
             else:
+                name = (
+                    family_names[0]
+                    if isinstance(family_names, (list, tuple)) and family_names
+                    else family_houses[0]
+                )
                 if use_latex:
-                    sym = _process_var_label(family_houses[0])
-                    parts.append(f"${obj_type}_{sym}$")
+                    parts.append(_singleton_latex(obj_type, name))
                 else:
-                    parts.append(f"{obj_type}_{family_houses[0]}")
+                    parts.append(f"{obj_type}_{name}")
         return ", ".join(parts)
 
     variable_registry = get_variable_registry()
@@ -1733,7 +1765,7 @@ def _snapshot_algebras_(style=None, use_latex=None, slim=False, **kwargs):
         return repr(x)
 
     def _format_basis(values):
-        if isinstance(values, (list, tuple)):
+        if isinstance(values, Sequence) and not isinstance(values, str):
             n = len(values)
             if n == 0:
                 return "-" if not use_latex else "$\\text{-}$"
@@ -1771,7 +1803,7 @@ def _snapshot_algebras_(style=None, use_latex=None, slim=False, **kwargs):
         family_values = system.get("family_values", ())
         basis_str = _format_basis(family_values)
 
-        if isinstance(family_values, (list, tuple)):
+        if isinstance(family_values, Sequence) and not isinstance(family_values, str):
             dim = len(family_values)
         else:
             dim = 1

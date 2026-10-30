@@ -73,7 +73,7 @@ def tensor_product(
             _markers["_tex_label"] = (
                 f"{target_alg._repr_latex_(raw=True, abbrev=True)}\\otimes {other._repr_latex_(raw=True, abbrev=True)}"
             )
-        if basis_labels is None or not isinstance(basis_labels, str):
+        if basis_labels is None:
             basis_labels = [
                 f"{elem1.__repr__()}_tensor_{elem2.__repr__()}"
                 for elem1 in target_alg.basis
@@ -99,7 +99,7 @@ def tensor_product(
             label = "Alg_" + create_key()
 
         if register_in_vmf is True:
-            from ..subspaces import createAlgebra
+            from ..creators import createAlgebra
 
             return createAlgebra(
                 target_alg.dimension * other.dimension,
@@ -121,7 +121,5 @@ def tensor_product(
                 _calledFromCreator=retrieve_passkey(),
                 _markers=_markers,
             )
-    elif isinstance(other, expr_numeric_types()):
-        return target_alg._convert_to_tp().__matmul__(other)
     else:
         return NotImplemented

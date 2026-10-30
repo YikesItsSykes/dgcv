@@ -14,6 +14,7 @@ from .._aux._backends._engine import (
     is_sage_available,
     is_sympy_available,
 )
+from .._aux._backends._groebner import _compute as _groebner_compute
 from .._aux._backends._types_and_constants import to_active_engine
 from .._aux._utilities._config import get_dgcv_settings_registry
 from ..core.solvers._solution_shapes import _sage_solve_to_dicts
@@ -78,13 +79,12 @@ def _run_with_budget(call, budget, feature):
 
 
 _UNSET = object()
-_cache = {"setting": _UNSET, "kind": None}
+_cache = {"pair": (_UNSET, None)}
 _bridges = {}
 
 
 def invalidate_secondary_cache():
-    _cache["setting"] = _UNSET
-    _cache["kind"] = None
+    _cache["pair"] = (_UNSET, None)
     for bridge in _bridges.values():
         bridge.forget()
     _bridges.clear()
@@ -92,23 +92,23 @@ def invalidate_secondary_cache():
 
 def secondary_kind():
     setting = get_dgcv_settings_registry().get("secondary_symbolic_engine", "auto")
-    if _cache["setting"] == setting:
-        return _cache["kind"]
+    pair = _cache["pair"]
+    if pair[0] == setting:
+        return pair[1]
     if setting is None:
         kind = None
     elif setting == "sympy":
         kind = "sympy" if is_sympy_available() else None
     elif setting == "sage":
         kind = "sage" if is_sage_available() else None
-    elif is_sympy_available():
-        kind = "sympy"
     elif is_sage_available():
         kind = "sage"
+    elif is_sympy_available():
+        kind = "sympy"
     else:
         kind = None
 
-    _cache["setting"] = setting
-    _cache["kind"] = kind
+    _cache["pair"] = (setting, kind)
     return kind
 
 
@@ -302,12 +302,15 @@ class SecondaryBridge:
             return self.symbol_for_label(leaf.label, leaf)
 
         if isinstance(leaf, ElementaryFunction):
-            return getattr(self.mod, leaf.name)(lower(leaf.args[0]))
+            out = getattr(self.mod, leaf.name)(lower(leaf.args[0]))
+            return self.mod.conjugate(out) if leaf.conjugated else out
         if isinstance(leaf, Radical):
             arg = lower(leaf.args[0])
             if self.kind == "sympy":
-                return self.mod.Pow(arg, self.mod.Rational(1, leaf.q))
-            return arg ** (self.mod.QQ(1) / leaf.q)
+                out = self.mod.Pow(arg, self.mod.Rational(1, leaf.q))
+            else:
+                out = arg ** (self.mod.QQ(1) / leaf.q)
+            return self.mod.conjugate(out) if leaf.conjugated else out
 
         if isinstance(leaf, FunctionAtom):
             head = self.head_for(leaf.label_base)
@@ -489,6 +492,17 @@ def solve_with_secondary(eqns, vars_):
         return _sage_solution_dicts(mod.solve(eqs, vs), vs)
 
     return with_secondary(list(eqns) + list(vars_), fn, feature="solve")
+
+
+def groebner_with_secondary(eqns, gens, order):
+    n_eqns = len(eqns)
+
+    def fn(mod, lowered, bridge):
+        return _groebner_compute(
+            bridge.kind, mod, list(lowered[:n_eqns]), list(lowered[n_eqns:]), order
+        )
+
+    return with_secondary(list(eqns) + list(gens), fn, feature="groebner")
 
 
 def _sage_solution_dicts(sols, vs):

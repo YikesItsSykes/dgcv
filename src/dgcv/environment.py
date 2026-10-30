@@ -52,6 +52,7 @@ _RESULT_SETTINGS = (
     "default_symbolic_engine",
     "pass_solve_requests_to_symbolic_engine",
     "_solve_default",
+    "_exceptional_cartan_basis",
     "use_rank_basis_extraction",
     "preferred_variable_format",
     "simplify_singularity_ideals_by_default",

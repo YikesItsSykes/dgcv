@@ -290,9 +290,11 @@ class subalgebra_element(dgcv_class):
                 new_coeffs = dict()
                 for idx1, c1 in self.coeff_dict.items():
                     for idx2, c2 in other.coeff_dict.items():
-                        scalar = sign * c1 * c2
                         row = alg._structure_row(idx1, idx2)
-                        for idx3, c3 in row._data.items():
+                        if not row:
+                            continue
+                        scalar = sign * c1 * c2
+                        for idx3, c3 in row.items():
                             new_coeffs[idx3] = new_coeffs.get(idx3, 0) + (
                                 self._si_wrap(scalar * c3) if spbd else scalar * c3
                             )

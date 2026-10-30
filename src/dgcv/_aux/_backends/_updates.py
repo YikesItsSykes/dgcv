@@ -60,6 +60,8 @@ baseline_defaults: Dict[str, Any] = {
     "_solve_default": "solve",
     "forgo_CAS_provenance_pruning": False,
     "forgo_builtin_probabilistic_shortcuts": False,
+    "basis_minting": "always",
+    "_exceptional_cartan_basis": "coroots",
 }
 
 
@@ -78,6 +80,7 @@ changes: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("0.4.20", {"theme": "paper_graphite"}),
     ("0.4.36", {"default_symbolic_engine": _infer_engine}),
     ("0.5.0", {"default_symbolic_engine": "builtin"}),
+    ("0.6.1", {"basis_minting": "auto", "_exceptional_cartan_basis": "coweights"}),
 )
 
 

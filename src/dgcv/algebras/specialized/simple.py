@@ -18,6 +18,8 @@ class simple_Lie_algebra(algebra_class):
         base_field=None,
         process_matrix_rep=False,
         preferred_representation=None,
+        matrix_representation=None,
+        tensor_representation=None,
         _label=None,
         _basis_labels=None,
         _calledFromCreator=None,
@@ -27,6 +29,7 @@ class simple_Lie_algebra(algebra_class):
         _exclude_from_VMF=None,
         _simple_data=None,
         _basis_labels_parent=None,
+        _mint_basis=None,
     ):
         if _calledFromCreator != retrieve_passkey():
             raise RuntimeError(
@@ -38,6 +41,8 @@ class simple_Lie_algebra(algebra_class):
             grading=grading,
             process_matrix_rep=process_matrix_rep,
             preferred_representation=preferred_representation,
+            matrix_representation=matrix_representation,
+            tensor_representation=tensor_representation,
             _label=_label,
             _basis_labels=_basis_labels,
             _calledFromCreator=_calledFromCreator,
@@ -48,6 +53,7 @@ class simple_Lie_algebra(algebra_class):
             _basis_labels_parent=_basis_labels_parent,
             _markers={
                 "simple": True,
+                "mint_basis": _mint_basis,
                 "_educed_properties": {
                     "is_simple": t_message,
                     "is_Lie_algebra": t_message,
@@ -82,6 +88,7 @@ class simple_Lie_algebra(algebra_class):
             root: self.rootSpaces[root] for root in self.simpleRoots
         }
         seriesLabel, rank = _simple_data["type"]
+        self._cartan_basis = _simple_data.get("cartan_basis", "coweights")
         self.rank = rank
         self.Cartan_subalgebra = self.basis[0:rank]
         self.simpleLieType = f"{seriesLabel}{rank}"  # example: "A3", "D4", ... etch
@@ -103,9 +110,14 @@ class simple_Lie_algebra(algebra_class):
             else:
                 return f"(r_1, ..., r_{idx})"
 
-        print(
-            f"This simple algebra {self.simpleLieType} has {self.rank} root{pluralize(self.rank)} {rootString(self.rank)}, which are dual to the Cartan subalgebra basis {self.Cartan_subalgebra}. These roots correspond to vertices in the Dynkin diagram as follows:\n"
-        )
+        if self._cartan_basis == "coroots":
+            print(
+                f"This simple algebra {self.simpleLieType} has {self.rank} simple root{pluralize(self.rank)} {rootString(self.rank)}. Its Cartan subalgebra basis {self.Cartan_subalgebra} consists of the simple coroots, so r_j evaluated on the i-th Cartan basis element is the (i, j) entry of the Cartan matrix. These roots correspond to vertices in the Dynkin diagram as follows:\n"
+            )
+        else:
+            print(
+                f"This simple algebra {self.simpleLieType} has {self.rank} root{pluralize(self.rank)} {rootString(self.rank)}, which are dual to the Cartan subalgebra basis {self.Cartan_subalgebra}. These roots correspond to vertices in the Dynkin diagram as follows:\n"
+            )
 
         if self.simpleLieType[0] == "D":
             n = self.rank
@@ -222,7 +234,7 @@ class simple_Lie_algebra(algebra_class):
             else:
                 horiz += "───".join("◯" for _ in range(n - 1))
                 top_labels = "   " + " ".join([f"r_{i + 1}" for i in range(n - 1)])
-                horiz += "══>◯"
+                horiz += "<══◯"
             top_labels += " " + f"r_{n}"
 
             # bounding box

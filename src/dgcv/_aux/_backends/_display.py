@@ -72,6 +72,8 @@ def latex(expr, **kwargs) -> str:
             expr, (bool, numbers.Integral)
         ):
             n, d = expr.numerator, expr.denominator
+            if d == 1:
+                return str(n)
             if n < 0:
                 return f"- \\frac{{{-n}}}{{{d}}}"
             return f"\\frac{{{n}}}{{{d}}}"

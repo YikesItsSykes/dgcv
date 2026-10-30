@@ -4,6 +4,7 @@ import random
 import uuid
 from fractions import Fraction
 
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._engine import engine_capability
 from ..._aux._backends._polynomials import (
     _ordered_factors,
@@ -16,6 +17,7 @@ from ..._aux._backends._polynomials import (
 )
 from ..._aux._backends._symbolic_router import (
     IndeterminateSignError,
+    _scalar_is_one,
     _scalar_is_zero,
     _scalar_sign,
     factor,
@@ -153,11 +155,19 @@ def _matrix_minimal_polynomial(mat, degree_bound, var):
     return degree, poly_expr
 
 
-def _split_along_minimal_polynomial(mat, poly_expr, var):
+def _rational_factors(expr, try_hard=False):
+    primitive_factors = engine_capability("primitive_factors")
+    if primitive_factors is not None:
+        found = primitive_factors(expr, try_hard=try_hard)
+        if found is not None:
+            return found
+    return [_unwrap_pow(f) for f in _ordered_factors(factor(expr))]
+
+
+def _irreducible_factors(poly_expr, var, try_hard=False):
     seen = set()
     irreducibles = []
-    for f in _ordered_factors(factor(poly_expr)):
-        base = _unwrap_pow(f)
+    for base in _rational_factors(poly_expr, try_hard=try_hard):
         degree = poly_total_degree(base, [var])
         if not degree:
             continue
@@ -166,6 +176,19 @@ def _split_along_minimal_polynomial(mat, poly_expr, var):
             continue
         seen.add(stamp)
         irreducibles.append((base, degree))
+    return irreducibles
+
+
+def _split_along_minimal_polynomial(mat, poly_expr, var):
+    irreducibles = _irreducible_factors(poly_expr, var)
+    if any(degree > 2 for _, degree in irreducibles):
+        irreducibles = _irreducible_factors(poly_expr, var, try_hard=True)
+        if any(degree > 2 for _, degree in irreducibles):
+            raise RuntimeError(
+                "decompose_semisimple_algebra could not split the algebra into "
+                "simple ideals over the real numbers. Installing sympy or Sage "
+                "may help."
+            )
 
     components = []
     for base, degree in irreducibles:
@@ -455,6 +478,9 @@ def _cartan_casimir(ads, coeffs, dimension):
 
 
 def _as_fraction(value):
+    fr = _exact_fraction(value)
+    if fr is not None:
+        return fr
     try:
         numerator, denominator = as_numer_denom(value)
         return Fraction(int(numerator), int(denominator))
@@ -471,8 +497,7 @@ def _casimir_spectrum(casimir, rank, dimension):
     if degree not in (2, 3):
         return None
     values = []
-    for f in _ordered_factors(factor(poly_expr)):
-        base = _unwrap_pow(f)
+    for base in _rational_factors(poly_expr):
         base_degree = poly_total_degree(base, [var])
         if base_degree == 0:
             continue
@@ -681,6 +706,25 @@ def _indep_check(
 
 
 def _elem_scale(elem, surface_singularities=False):
+    if get_dgcv_category(elem) in {"algebra_element", "subalgebra_element"}:
+        cd = elem.coeff_dict
+        for k in sorted(cd):
+            c = cd[k]
+            if _scalar_is_zero(c):
+                continue
+            if get_free_symbols(c):
+                break
+            if _scalar_is_one(c) and (
+                elem.algebra.simplify_products_by_default is not True
+                or all(_exact_fraction(v) is not None for v in cd.values())
+            ):
+                break
+            try:
+                out = elem / c
+            except Exception:
+                break
+            return (out, []) if surface_singularities else out
+        return (elem, []) if surface_singularities else elem
     coeffs = getattr(elem, "coeffs", None)
     if isinstance(coeffs, (list, tuple)):
         for c in coeffs:
@@ -770,6 +814,12 @@ def _decline(reason):
     return None
 
 
+def _span_fraction(value):
+    if getattr(type(value), "__dgcv_exact_fraction__", None) is not None:
+        return None
+    return _exact_fraction(value)
+
+
 def _span_scalar(value):
     if value.denominator == 1:
         return rational(value.numerator)
@@ -851,7 +901,7 @@ class _span_solver:
                 if row is None:
                     row = len(index)
                     index[key] = row
-                if numeric and _exact_fraction(value) is None:
+                if numeric and _span_fraction(value) is None:
                     numeric = False
                 out[row] = value
             raw.append(out)
@@ -911,7 +961,7 @@ class _span_solver:
                 if row is None:
                     row = len(index)
                     index[key] = row
-                if numeric and _exact_fraction(value) is None:
+                if numeric and _span_fraction(value) is None:
                     numeric = False
                 out[row] = value
             raw.append(out)
@@ -965,6 +1015,10 @@ class _span_solver:
         if isinstance(wanted, range):
             return not wanted or (wanted.start >= lo and wanted[-1] < hi)
         return all(lo <= i < hi for i in wanted)
+
+    @property
+    def thread_safe(self):
+        return getattr(self._field, "thread_safe", True)
 
     def reduce_vector(self, vec, wanted=None):
         index = self.keys
@@ -1121,7 +1175,7 @@ class _span_solver:
                     return None
                 if _scalar_is_zero(value):
                     continue
-                fr = _exact_fraction(value) if numeric else None
+                fr = _span_fraction(value) if numeric else None
                 if fr is None:
                     numeric = False
                 vec[row] = value
@@ -1158,7 +1212,7 @@ class _span_solver:
         out = {}
         if self.numeric:
             for row, value in vec.items():
-                fr = _exact_fraction(value)
+                fr = _span_fraction(value)
                 if fr is None:
                     return None
                 if fr:
@@ -1424,19 +1478,25 @@ def _extract_basis_by_rank(
     if not isinstance(element_list, (list, tuple)):
         element_list = list(element_list)
 
-    prepared = []
     sing = []
-    for idx, elem in enumerate(element_list):
-        if _scalar_is_zero(elem):
-            continue
-        if ALBS is True:
-            scaled = _elem_scale(elem, surface_singularities=surface_singularities)
+    kept = [(idx, elem) for idx, elem in enumerate(element_list) if not _scalar_is_zero(elem)]
+    if ALBS is True:
+        scaled = parallel_map(
+            "elem_scale",
+            lambda pair: _elem_scale(pair[1], surface_singularities=surface_singularities),
+            kept,
+            min_items=64,
+        )
+        prepared = []
+        for (idx, _), out in zip(kept, scaled):
             if surface_singularities:
-                elem, new_sing = scaled
+                elem, new_sing = out
                 sing = _ordered_union(sing, new_sing)
             else:
-                elem = scaled
-        prepared.append((idx, elem))
+                elem = out
+            prepared.append((idx, elem))
+    else:
+        prepared = kept
 
     picked = _span_pick(prepared, surface_singularities)
     if picked is not None:

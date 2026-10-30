@@ -36,11 +36,18 @@ class _vector_space_methods:
         return self._basis_index_cache
 
     def __contains__(self, item):
+        basis = self.basis
+        if hasattr(basis, "materialize"):
+            return item in basis
         return item in self._basis_index
 
     @property
     def zero_element(self):
         return self._class_builder({}, 1)
+
+    def _materialize_full_basis(self):
+        materialize = getattr(self.basis, "materialize", None)
+        return self.basis if materialize is None else materialize()
 
     def _weight_coordinates(self, element):
         coeffs = self.contains(element, return_basis_coeffs=True)

@@ -259,6 +259,31 @@ def legacy_engine_inference():
     return "sage" if on_sage_kernel_inference() else "sympy"
 
 
+AUTO_BASIS_MINTING_THRESHOLD = 1000
+_basis_minting_cache = {}
+
+
+def parse_basis_minting(value):
+    parsed = _basis_minting_cache.get(value) if isinstance(value, str) else None
+    if parsed is not None:
+        return parsed
+    words = value.lower().split() if isinstance(value, str) else ()
+    if words in (["always"], ["never"]):
+        parsed = (words[0], None)
+    elif words == ["auto"]:
+        parsed = ("threshold", AUTO_BASIS_MINTING_THRESHOLD)
+    elif len(words) == 2 and words[0] == "threshold" and words[1].isdigit():
+        if int(words[1]) > 0:
+            parsed = ("threshold", int(words[1]))
+    if parsed is None:
+        raise ValueError(
+            "`basis_minting` must be 'always', 'auto', 'never' or 'threshold N' "
+            f"with N a positive integer; received {value!r}."
+        )
+    _basis_minting_cache[value] = parsed
+    return parsed
+
+
 def default_engine_inference():
     return "builtin"
 
@@ -295,7 +320,10 @@ dgcv_settings_registry = {
     "forgo_builtin_probabilistic_shortcuts": False,
     "secondary_time_budget": None,
     "generic_structure_constants": None,
+    "parallel_threads": None,
+    "basis_minting": "auto",
     "_solve_default": "auto",
+    "_exceptional_cartan_basis": "coweights",
     "__": dict(),
 }
 

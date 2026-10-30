@@ -51,6 +51,7 @@ from ._config import (
     get_dgcv_settings_registry,
     get_variable_registry,
     on_sage_kernel_inference,
+    parse_basis_minting,
     vlp,
 )
 
@@ -88,6 +89,9 @@ def set_dgcv_settings(
     forgo_builtin_probabilistic_shortcuts: bool | None = None,
     secondary_time_budget: float | None = _UNSET,
     generic_structure_constants: bool | None = _UNSET,
+    basis_minting: str | None = None,
+    parallel_threads: int | None = _UNSET,
+    _parallel_sites=_UNSET,
     **kwargs,
 ):
     if kwargs.pop("quick_notebook", False):
@@ -459,6 +463,29 @@ def set_dgcv_settings(
             else bool(generic_structure_constants),
         )
 
+    if parallel_threads is not _UNSET:
+        threads = None if parallel_threads is None else int(parallel_threads)
+        _apply_keyval("parallel_threads", threads if threads and threads > 1 else None)
+
+    if _parallel_sites is not _UNSET:
+        _apply_keyval(
+            "_parallel_sites",
+            None if _parallel_sites is None else frozenset(_parallel_sites),
+        )
+
+    if basis_minting is not None:
+        try:
+            kind, threshold = parse_basis_minting(basis_minting)
+        except ValueError as exc:
+            dgcv_warning(f"{exc} The setting was not changed.", stacklevel=2)
+        else:
+            _apply_keyval(
+                "basis_minting",
+                " ".join(basis_minting.lower().split())
+                if kind == "threshold"
+                else kind,
+            )
+
     _provenance_guard(dgcvSR)
 
 
@@ -540,6 +567,8 @@ def view_dgcv_settings(verbose=False):
         hidden = hidden | {"secondary_time_budget"}
     if settings.get("generic_structure_constants") is None:
         hidden = hidden | {"generic_structure_constants"}
+    if settings.get("parallel_threads") is None:
+        hidden = hidden | {"parallel_threads"}
     if settings.get("secondary_symbolic_engine") is None:
         hidden = hidden | {"secondary_symbolic_engine"}
     items = [(k, v) for k, v in settings.items() if k not in hidden]
@@ -604,6 +633,8 @@ def reset_dgcv_settings():
             "secondary_symbolic_engine": "auto",
             "secondary_time_budget": None,
             "generic_structure_constants": None,
+            "parallel_threads": None,
+            "basis_minting": "auto",
             "verbose_label_printing": False,
             "VLP": vlp,
             "conjugation_prefix": "BAR",

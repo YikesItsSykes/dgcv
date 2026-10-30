@@ -242,6 +242,30 @@ def createBigradPolynomial(
     return polynomial_dgcv(expr, varSpace=vars_)
 
 
+def _weighted_exponent_tuples(weights, degree):
+    n = len(weights)
+    if degree < 0:
+        return []
+    if n == 0:
+        return [()] if degree == 0 else []
+    out = []
+    exps = [0] * n
+
+    def rec(j, remaining):
+        w = weights[j]
+        if j == n - 1:
+            if remaining % w == 0:
+                exps[j] = remaining // w
+                out.append(tuple(exps))
+            return
+        for e in range(remaining // w + 1):
+            exps[j] = e
+            rec(j + 1, remaining - e * w)
+
+    rec(0, degree)
+    return out
+
+
 def createMultigradedPolynomial(
     coeff_label: str,
     degrees: Union[int, Sequence[int]],
@@ -290,15 +314,32 @@ def createMultigradedPolynomial(
         max_deg = max(int(abs(d)) for d in degs)
         max_deg = max(max_deg, int(degreeCap))
 
-    candidates = chooseOp(range(max_deg + 1), len(vars_))
-    exponent_tuples = [
-        exps
-        for exps in candidates
-        if all(
-            sum(e * wj for e, wj in zip(exps, ws[k])) == int(degs[k])
-            for k in range(len(degs))
-        )
-    ]
+    exponent_tuples = None
+    for k0, w0 in enumerate(ws):
+        sign = 1 if all(j > 0 for j in w0) else -1 if all(j < 0 for j in w0) else 0
+        if sign == 0:
+            continue
+        d0 = sign * int(degs[k0])
+        exponent_tuples = [
+            exps
+            for exps in _weighted_exponent_tuples([sign * j for j in w0], d0)
+            if all(
+                sum(e * wj for e, wj in zip(exps, ws[k])) == int(degs[k])
+                for k in range(len(degs))
+                if k != k0
+            )
+        ]
+        break
+    if exponent_tuples is None:
+        candidates = chooseOp(range(max_deg + 1), len(vars_))
+        exponent_tuples = [
+            exps
+            for exps in candidates
+            if all(
+                sum(e * wj for e, wj in zip(exps, ws[k])) == int(degs[k])
+                for k in range(len(degs))
+            )
+        ]
 
     if register_coeffs_in_vmf:
         clearVar(coeff_label, report=report_vmf_updates)

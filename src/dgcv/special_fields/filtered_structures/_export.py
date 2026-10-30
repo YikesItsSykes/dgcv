@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
     is_zero_knowing_zero_is_expected,
@@ -9,7 +10,7 @@ from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import retrieve_passkey
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.solvers import solve_knowing_solution_exists
-from ._brackets import _sparse_row
+from ._brackets import _plain_row, _sparse_row
 
 
 class _symbol_export:
@@ -130,9 +131,25 @@ class _symbol_export:
             shape=(dimen, dimen),
             null_return=freeze_matrix(matrix_dgcv.zeros(dimen, 1)),
         )
-        for j in range(dimen):
-            for k in range(j + 1, dimen):
-                bracket_data = bracket_decomp(k, j, try_hard=try_hard)
+        plain = self._plain_scalars()
+        pair_list = [(j, k) for j in range(dimen) for k in range(j + 1, dimen)]
+        decomps = (
+            parallel_map(
+                "export_pairs",
+                lambda jk: bracket_decomp(jk[1], jk[0], try_hard=try_hard),
+                pair_list,
+                min_items=64,
+            )
+            if table_bracket is not None
+            else None
+        )
+        for position, (j, k) in enumerate(pair_list):
+            if True:
+                bracket_data = (
+                    decomps[position]
+                    if decomps is not None
+                    else bracket_decomp(k, j, try_hard=try_hard)
+                )
                 if bracket_data == "NoSol":
                     if not try_hard:
                         dgcv_warning(
@@ -153,6 +170,10 @@ class _symbol_export:
                             "Unable to extract algebra structure from `Tanaka_symbol` object, "
                             + warningStr
                         )
+                if not bracket_data:
+                    continue
+                if plain:
+                    bracket_data = _plain_row(bracket_data)
                 new_mat = matrix_dgcv(bracket_data, shape=(dimen, 1))
                 if new_mat:
                     str_data[(k, j)] = new_mat

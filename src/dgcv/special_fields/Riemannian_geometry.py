@@ -56,6 +56,36 @@ __all__ = ["metricClass", "metric_from_matrix"]
 # -----------------------------------------------------------------------------
 # body
 # -----------------------------------------------------------------------------
+def _convert_varSpace(varSpace, formatting):
+    out = []
+    for v in varSpace:
+        info = vmf_lookup(v, relatives=True)
+        rel = (info.get("relatives") or {}) if info.get("type") == "coordinate" else {}
+
+        def _one(key):
+            t = rel.get(key)
+            if t is None:
+                return None
+            if isinstance(t, tuple):
+                return t[0] if len(t) == 1 else None
+            return t
+
+        holo, anti, real, imag = (_one(k) for k in ("holo", "anti", "real", "imag"))
+        if formatting == "real":
+            if v == holo and real is not None:
+                v = real
+            elif v == anti and imag is not None:
+                v = imag
+        else:
+            if v == real and holo is not None:
+                v = holo
+            elif v == imag and anti is not None:
+                v = anti
+        if v not in out:
+            out.append(v)
+    return tuple(out)
+
+
 class metricClass(dgcv_class):
     def __init__(
         self,
@@ -256,8 +286,30 @@ class metricClass(dgcv_class):
                 "_repr_latex_",
                 None,
             )
-            self._raw_latex = f(raw=raw, **kwargs)
-        return self._raw_latex if raw else f"$\\displaystyle{self._raw_latex}$"
+            self._raw_latex = f(raw=True, **kwargs)
+        return self._raw_latex if raw else f"$\\displaystyle {self._raw_latex}$"
+
+    def _to_real(self, plan=None):
+        return self._to_format("real", plan)
+
+    def _to_complex(self, plan=None):
+        return self._to_format("complex", plan)
+
+    def _to_format(self, formatting, plan=None):
+        if self.formatting == formatting:
+            return self
+        if isinstance(plan, dict) and (
+            plan.get("skipVar") or plan.get("variables_scope")
+        ):
+            raise ValueError(
+                "metric conversion does not support skipVar or variables_scope"
+            )
+        return metricClass(
+            self.SymTensorField,
+            varSpace=_convert_varSpace(self.varSpace, formatting),
+            variable_inference_behavior=self.variable_inference_behavior,
+            formatting=formatting,
+        )
 
     def _local_info_for_index(self, i: int) -> str:
         cache = getattr(self, "_local_systems", None)

@@ -44,10 +44,14 @@ limitations under the License.
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import Any, Iterable, List, Literal, Sequence, Tuple
 
 from .._aux._backends import simplify_dgcv
-from .._aux._backends._engine import engine_module
+from .._aux._backends._calculus import diff
+from .._aux._backends._engine import engine_capability, engine_kind, engine_module
+from .._aux._backends._numeric_router import rational_sample
+from .._aux._backends._polynomials import PolyBackendError, poly_terms
 from .._aux._backends._symbolic_router import (
     _scalar_is_zero,
     as_numer_denom,
@@ -55,10 +59,13 @@ from .._aux._backends._symbolic_router import (
     conjugate,
     expand,
     get_free_symbols,
+    im,
+    re,
     subs,
 )
 from .._aux._backends._types_and_constants import (
     _disposable_symbols,
+    exact_fraction,
     expr_numeric_types,
     imag_unit,
     rational,
@@ -70,8 +77,10 @@ from .._aux._vmf._safeguards import (
     query_dgcv_categories,
     retrieve_passkey,
 )
-from .._aux._vmf.vmf import clearVar, listVar, order_coordinates, vmf_lookup
+from .._aux._backends._parallel import parallel_map, thread_count
+from .._aux._vmf.vmf import order_coordinates, vmf_lookup
 from ..core.arrays import matrix_dgcv
+from ..eds import zero_form_class
 from ..core.base import dgcv_class
 from ..core.conversions.conversions import (
     allToReal,
@@ -85,10 +94,12 @@ from ..core.dgcv_core import (
     holVF_coeffs,
     polynomial_dgcv,
     realPartOfVF,
-    tensor_field_class,
     wedge,
 )
-from ..core.polynomials.polynomials import createMultigradedPolynomial
+from ..core.polynomials.polynomials import (
+    _weighted_exponent_tuples,
+    createMultigradedPolynomial,
+)
 from ..core.solvers import solve_dgcv
 from ..core.vector_fields_and_differential_forms import (
     LieDerivative,
@@ -98,6 +109,7 @@ from ..core.vector_fields_and_differential_forms import (
 )
 from .complex_structures import Del, DelBar
 from .filtered_structures import distribution, filtration_class
+from .filtered_structures._distribution import _flag_span
 
 __all__ = [
     "CR_structure",
@@ -112,6 +124,26 @@ __all__ = [
 # -----------------------------------------------------------------------------
 # classes
 # -----------------------------------------------------------------------------
+def _graph_coordinate_order(graph_coordinates, eqns_data):
+    import graphlib
+
+    tree = {
+        gc: {eq["graph_coor"] for eq in eqns_data if gc in eq["fun_symbols"]}
+        for gc in graph_coordinates
+    }
+    try:
+        order = list(graphlib.TopologicalSorter(tree).static_order())
+    except graphlib.CycleError:
+        return None
+    return {coor: c for c, coor in enumerate(order)}
+
+
+def _complex_fraction(value):
+    a, b = exact_fraction(re(value)), exact_fraction(im(value))
+    if a is None or b is None:
+        return None
+    return a, b
+
 class CR_structure(dgcv_class):
     """
     Represents local CR structure on a real submanifold in complex space given locally by defining equations.
@@ -178,10 +210,11 @@ class CR_structure(dgcv_class):
                     break
                 if key_info.get("sub_type", None) not in ri_types:
                     self.graph_format = False
-                    raise (
+                    dgcv_warning(
                         "Initializing a `CR_structure` with `defining_equations` in the dictionary format is intended for inputing equations in a graph format (e.g., graph coordinates equal functions of other coordinates). To process it as `graph form`, the dictionary's keys must be real or imaginary parts of holomorphic coordinates belonging to a coordinate system registered in the dgcv VMF. The given dictionary fails this condition, so preserving `graph form` has been abandoned."
                     )
                     break
+                real_k = key_info["relatives"][key_info["sub_type"]]
                 holoVar = key_info.get("relatives", dict()).get("holo", None)
                 if holoVar not in seen_coordinates:
                     added_vars.add(holoVar)
@@ -210,18 +243,10 @@ class CR_structure(dgcv_class):
                         "fun_symbols": v_fv,
                     }
                 )
-            import graphlib
-
-            graph_coor_tree = {
-                gc: {eq["graph_coor"] for eq in eqns_data if gc in eq["fun_symbols"]}
-                for gc in graph_coordinates
-            }
-            try:
-                ts = graphlib.TopologicalSorter(graph_coor_tree)
-                graph_coordinates_ordering = {
-                    coor: c for c, coor in enumerate(list(ts.static_order()))
-                }
-            except graphlib.CycleError:
+            graph_coordinates_ordering = _graph_coordinate_order(
+                graph_coordinates, eqns_data
+            )
+            if graph_coordinates_ordering is None:
                 self.graph_format = False
                 dgcv_warning(
                     "Initializing a `CR_structure` with `defining_equations` in the dictionary format is intended for inputing equations in a graph format (e.g., graph coordinates equal functions of other coordinates like {x_1=f_1,...}, such that [x_j<x_k iff f_j doesn't depend on x_j] determines a partial order). The given dictionary however has an equation of the form x=f(x,y,...), so preserving `graph form` has been abandoned."
@@ -271,15 +296,15 @@ class CR_structure(dgcv_class):
                 try:
                     defining_equations = [v - k for k, v in defining_equations.items()]
                 except Exception:
-                    raise (
-                        "Given `defining_equations` parameter is in an unsuported format."
+                    raise TypeError(
+                        "Given `defining_equations` parameter is in an unsupported format."
                     )
         if self.graph_format is False:
             if isinstance(defining_equations, expr_numeric_types()):
                 defining_equations = [defining_equations]
             if not isinstance(defining_equations, (list, tuple)):
-                raise (
-                    "Given `defining_equations` parameter is in an unsuported format."
+                raise TypeError(
+                    "Given `defining_equations` parameter is in an unsupported format."
                 )
             self.flattened_defining_equations = (
                 [allToReal(eqn) for eqn in defining_equations]
@@ -322,9 +347,11 @@ class CR_structure(dgcv_class):
         self._complex_coordinates = None
         self._levi_2form = None
         self._graph_format_cache = None
+        self._recovered_graph_cache = None
         self._LFM = None
         self._Freeman_filtration = None
         self._Freeman_filtration_list = None
+        self._Freeman_divisors = None
         self._real_def_eqns_cache = None
         self._symmetries = dict()
 
@@ -361,11 +388,24 @@ class CR_structure(dgcv_class):
 
     @property
     def CR_dimension(self):
+        if self.default_coordinate_format == "complex":
+            return len(self.holomorphic_CR_distribution.vf_basis)
         return self.CR_distribution.rank // 2
 
     @property
     def CR_distribution(self):
         if self._CR_distribution is None:
+            if self.default_coordinate_format == "complex":
+                Imag = imag_unit()
+                hol = self.holomorphic_CR_distribution.vf_basis
+                conjs = [conjugate(X, symbolic=True) for X in hol]
+                self._CR_distribution = distribution(
+                    [X + Xc for X, Xc in zip(hol, conjs)]
+                    + [Imag * (Xc - X) for X, Xc in zip(hol, conjs)],
+                    formatting="complex",
+                    assume_spanning_sections_linearly_indep=True,
+                )
+                return self._CR_distribution
             t_basis = self.tangent_bundle.vf_basis
             canonf = self.tangent_bundle.anticanonical_bundle
             Jt_basis = [complex_struct_op(vf) for vf in t_basis]
@@ -396,14 +436,29 @@ class CR_structure(dgcv_class):
             zeroing = {var: 0 for var in free_vars}
             self._CR_distribution = distribution(
                 [subs(gen_sol, zeroing | {var: 1}) for var in free_vars],
-                _assume_minimal_Data=True,
+                assume_spanning_sections_linearly_indep=True,
             )
         return self._CR_distribution
 
     @property
     def holomorphic_CR_distribution(self):
         if self._holomorphic_CR_distribution is None:
-            if self._antiholomorphic_CR_dist is None:
+            if (
+                self._antiholomorphic_CR_dist is None
+                and self.default_coordinate_format == "complex"
+            ):
+                basis = annihilator(
+                    [Del(rho) for rho in self.flattened_defining_equations],
+                    self.holomorphic_coordinates,
+                    polynomial_bases=True,
+                    coherent_coordinates_checked=True,
+                )
+                self._holomorphic_CR_distribution = distribution(
+                    basis,
+                    formatting="complex",
+                    assume_spanning_sections_linearly_indep=True,
+                )
+            elif self._antiholomorphic_CR_dist is None:
                 Imag = imag_unit()
                 self._holomorphic_CR_distribution = distribution(
                     [
@@ -423,7 +478,16 @@ class CR_structure(dgcv_class):
     @property
     def antiholomorphic_CR_distribution(self):
         if self._antiholomorphic_CR_dist is None:
-            if self._holomorphic_CR_distribution is None:
+            if self.default_coordinate_format == "complex":
+                self._antiholomorphic_CR_dist = distribution(
+                    [
+                        conjugate(X, symbolic=True)
+                        for X in self.holomorphic_CR_distribution.vf_basis
+                    ],
+                    formatting="complex",
+                    assume_spanning_sections_linearly_indep=True,
+                )
+            elif self._holomorphic_CR_distribution is None:
                 Imag = imag_unit()
                 self._antiholomorphic_CR_dist = distribution(
                     [
@@ -483,7 +547,7 @@ class CR_structure(dgcv_class):
             self._tangent_bundle = distribution(
                 basis,
                 formatting=self.default_coordinate_format,
-                _assume_minimal_Data=True,
+                assume_spanning_sections_linearly_indep=True,
             )
         return self._tangent_bundle
 
@@ -646,88 +710,283 @@ class CR_structure(dgcv_class):
     @property
     def Freeman_filtration(self):
         if self._Freeman_filtration is None:
-            antihol = self.antiholomorphic_CR_distribution
-            levels = [self.holomorphic_CR_distribution.vf_basis]
-            vl = create_key("var")
-            local_vars = _disposable_symbols(vl, len(levels[0]))
+            self._compute_Freeman_filtration()
+        return self._Freeman_filtration
 
-            def descent(level_list, pair, variables):
-                if len(level_list[0]) == 0:
-                    return level_list
-                level = level_list[0]
-                v_trunc = variables[: len(level)]
-                general_elem = sum(v * elem for v, elem in zip(v_trunc, level))
-                new_c_form = wedge(pair.anticanonical_bundle, *level)
-                eqns = [
-                    wedge(LieDerivative(general_elem, vf), new_c_form)
-                    for vf in pair.vf_basis
-                ]
+    def _compute_Freeman_filtration(self, track_singularities=False):
+        levels = [list(self.holomorphic_CR_distribution.vf_basis)]
+        local_vars = _disposable_symbols(create_key("var"), len(levels[0]))
+        if self.default_coordinate_format == "complex":
+            filtration_bases, divisors = self._Freeman_descent(
+                levels, local_vars, track_singularities
+            )
+        else:
+            filtration_bases = self._Freeman_descent_legacy(levels, local_vars)
+            divisors = None
+        self._Freeman_divisors = divisors
+        alligned_bases = filtration_bases[:1]
+        shortened_alligneds = list(alligned_bases)
+        if len(filtration_bases) > 1:
+            span = _flag_span(
+                list(filtration_bases[0]),
+                tuple(self.default_coordinates) + tuple(self.parameters),
+                False,
+            )
+            dim = len(filtration_bases[0])
+            for basis in filtration_bases[1:]:
+                current_basis, new_elems = list(alligned_bases[0]), []
+                discrep = len(basis) - dim
+                dim = len(basis)
+                for elem in basis:
+                    if discrep == 0:
+                        break
+                    if not span.independent(elem):
+                        continue
+                    discrep -= 1
+                    current_basis.append(elem)
+                    new_elems.append(elem)
+                alligned_bases = [current_basis] + alligned_bases
+                shortened_alligneds.append(new_elems)
+        self._Freeman_filtration = filtration_class(
+            shortened_alligneds, assume_spanning_sections_linearly_indep=True
+        )
+        self._Freeman_filtration_list = [
+            distribution(
+                base,
+                assume_compatibility=True,
+                formatting=self.default_coordinate_format,
+                assume_spanning_sections_linearly_indep=True,
+            )
+            for base in alligned_bases
+        ]
+
+    def _Freeman_level_equations(self, general_elem, level, first):
+        antihol = self.antiholomorphic_CR_distribution.vf_basis
+        if first:
+            eqns = []
+            for vf in antihol:
+                eqns.extend(
+                    self.Levi_form_skew_unrestricted(
+                        general_elem, vf, format_scalar_as_vector=True
+                    )
+                )
+            return eqns
+        phis = annihilator(
+            list(level),
+            self.holomorphic_coordinates,
+            polynomial_bases=True,
+            coherent_coordinates_checked=True,
+        )
+        return [
+            expand(phi(LieDerivative(general_elem, vf)))
+            for vf in antihol
+            for phi in phis
+        ]
+
+    def _Freeman_descent(self, levels, local_vars, track_singularities):
+        divisors = []
+        first = True
+        while len(levels[0]) > 0:
+            level = levels[0]
+            if (
+                not first
+                and not track_singularities
+                and self._Freeman_level_is_final(level)
+            ):
+                return [[]] + levels, None
+            v_trunc = local_vars[: len(level)]
+            general_elem = sum(v * elem for v, elem in zip(v_trunc, level))
+            eqns = self._Freeman_level_equations(general_elem, level, first)
+            first = False
+            if not track_singularities and self._Freeman_kernel_is_trivial(
+                eqns, v_trunc
+            ):
+                return [[]] + levels, None
+            if track_singularities:
+                solution, divs = solve_dgcv(
+                    eqns,
+                    v_trunc,
+                    method="linear_parametric",
+                    simplify_result=False,
+                    return_divisors=True,
+                )
+                divisors.append(divs)
+            else:
                 solution = solve_dgcv(
                     eqns, v_trunc, method="linear_parametric", simplify_result=False
                 )
-                gen_solution = subs(general_elem, solution[0])
-                free_vars, var_set = set(), set(v_trunc)
-                for expr in solution[0].values():
-                    free_vars |= {
-                        var for var in get_free_symbols(expr) if var in var_set
-                    }
-                zeroing = {var: 0 for var in free_vars}
-                new_level = [
-                    [
-                        subs(
-                            gen_solution, zeroing | {var: 1}
-                        ).scale_to_polynomial_attempt()
-                        for var in free_vars
-                    ]
-                ]
-                lnl = len(new_level[0])
-                if len(level_list[0]) == lnl:
-                    return level_list
-                if lnl == 0:
-                    return [[]] + level_list
-                level_list = new_level + level_list
-                return descent(level_list, pair, variables)
-
-            filtration_bases = descent(levels, antihol, local_vars)
-            alligned_bases = filtration_bases[:1]
-            shortened_alligneds = list(alligned_bases)
-            if len(filtration_bases) > 1:
-                obstruction = wedge(*filtration_bases[0])
-                if obstruction is None:
-                    obstruction = tensor_field_class(coeff_dict={tuple(): 1})
-                dim = len(filtration_bases[0])
-                for basis in filtration_bases[1:]:
-                    current_basis, new_elems = list(alligned_bases[0]), []
-                    new_dim = len(basis)
-                    discrep = new_dim - dim
-                    dim = new_dim
-                    for elem in basis:
-                        if discrep == 0:
-                            break
-                        test = simplify_dgcv(wedge(elem, obstruction))
-                        if _scalar_is_zero(test):
-                            continue
-                        discrep += -1
-                        current_basis.append(elem)
-                        new_elems.append(elem)
-                        obstruction = test
-                    alligned_bases = [current_basis] + alligned_bases
-                    shortened_alligneds.append(new_elems)
-
-            self._Freeman_filtration = filtration_class(
-                shortened_alligneds, assume_spanning_sections_linearly_indep=True
-            )
-            self._Freeman_filtration_list = [
-                distribution(
-                    base,
-                    assume_compatibility=True,
-                    formatting=self.default_coordinate_format,
-                    _assume_minimal_Data=True,
-                )
-                for base in alligned_bases
+            gen_solution = subs(general_elem, solution[0])
+            var_set, found = set(v_trunc), set()
+            for expr in solution[0].values():
+                found |= {var for var in get_free_symbols(expr) if var in var_set}
+            free_vars = [var for var in v_trunc if var in found]
+            zeroing = {var: 0 for var in free_vars}
+            new_level = [
+                subs(gen_solution, zeroing | {var: 1}).scale_to_polynomial_attempt()
+                for var in free_vars
             ]
+            if len(new_level) == len(level):
+                break
+            levels = [new_level] + levels
+            if not new_level:
+                break
+        return levels, (divisors[::-1] if track_singularities else None)
 
-        return self._Freeman_filtration
+    def _Freeman_level_is_final(self, level):
+        dfs = []
+        for coord in self.holomorphic_coordinates:
+            ds = vmf_lookup(coord, differential_system=True).get("differential_system")
+            df = ds.get("df") if ds else None
+            if df is None:
+                return False
+            dfs.append(df)
+        antihol = self.antiholomorphic_CR_distribution.vf_basis
+
+        def components(vf):
+            out = []
+            for df in dfs:
+                value = df(vf)
+                cd = getattr(value, "coeff_dict", None)
+                if cd is not None:
+                    value = next(iter(cd.values()), 0)
+                out.append(value)
+            return out
+
+        level_rows = [components(elem) for elem in level]
+        bracket_rows = [
+            [components(LieDerivative(elem, vf)) for elem in level] for vf in antihol
+        ]
+        symbols = set()
+        for row in level_rows + [row for rows in bracket_rows for row in rows]:
+            for entry in row:
+                symbols |= set(get_free_symbols(entry))
+        m, n = len(level), len(dfs)
+        unknowns = m * (1 + len(antihol))
+        for _ in range(8):
+            point = {s: rational_sample() for s in symbols}
+            try:
+                A = [[_complex_fraction(subs(e, point)) for e in row] for row in level_rows]
+                B = [
+                    [[_complex_fraction(subs(e, point)) for e in row] for row in rows]
+                    for rows in bracket_rows
+                ]
+            except ZeroDivisionError:
+                continue
+            except ValueError as err:
+                if "division by zero" not in str(err):
+                    raise
+                continue
+            if any(x is None for row in A for x in row) or any(
+                x is None for rows in B for row in rows for x in row
+            ):
+                return False
+            real_rows = []
+            for k, Bk in enumerate(B):
+                for i in range(n):
+                    c = [(Fraction(0), Fraction(0))] * unknowns
+                    for a in range(m):
+                        c[a] = Bk[a][i]
+                    for b in range(m):
+                        c[m + k * m + b] = (-A[b][i][0], -A[b][i][1])
+                    re_part = [x[0] for x in c]
+                    im_part = [x[1] for x in c]
+                    real_rows.append(re_part + [-x for x in im_part])
+                    real_rows.append(im_part + re_part)
+            return self._fraction_rank(real_rows) == 2 * unknowns
+        return False
+
+    def _Freeman_kernel_is_trivial(self, eqns, variables):
+        var_set = set(variables)
+        symbols = set()
+        for eqn in eqns:
+            symbols |= set(get_free_symbols(eqn))
+        symbols -= var_set
+        zeros = {var: 0 for var in variables}
+        for _ in range(8):
+            point = {s: rational_sample() for s in symbols}
+            try:
+                evaluated = [subs(eqn, point) for eqn in eqns]
+            except ZeroDivisionError:
+                continue
+            except ValueError as err:
+                if "division by zero" not in str(err):
+                    raise
+                continue
+            real_rows, imag_rows = [], []
+            for val in evaluated:
+                real_row, imag_row = [], []
+                for var in variables:
+                    entry = subs(val, zeros | {var: 1})
+                    a, b = exact_fraction(re(entry)), exact_fraction(im(entry))
+                    if a is None or b is None:
+                        return False
+                    real_row.append(a)
+                    imag_row.append(b)
+                real_rows.append(real_row)
+                imag_rows.append(imag_row)
+            rows = [a + [-x for x in b] for a, b in zip(real_rows, imag_rows)]
+            rows += [b + a for a, b in zip(real_rows, imag_rows)]
+            return self._fraction_rank(rows) == 2 * len(variables)
+        return False
+
+    @staticmethod
+    def _fraction_rank(rows):
+        rows = [[Fraction(x) for x in row] for row in rows if any(row)]
+        rank = 0
+        for c in range(len(rows[0]) if rows else 0):
+            piv = next((i for i in range(rank, len(rows)) if rows[i][c] != 0), None)
+            if piv is None:
+                continue
+            rows[rank], rows[piv] = rows[piv], rows[rank]
+            pivot_row = rows[rank]
+            for i in range(len(rows)):
+                if i != rank and rows[i][c] != 0:
+                    f = rows[i][c] / pivot_row[c]
+                    rows[i] = [a - f * b for a, b in zip(rows[i], pivot_row)]
+            rank += 1
+        return rank
+
+    def _Freeman_descent_legacy(self, levels, local_vars):
+        antihol = self.antiholomorphic_CR_distribution
+
+        def descent(level_list, pair, variables):
+            if len(level_list[0]) == 0:
+                return level_list
+            level = level_list[0]
+            v_trunc = variables[: len(level)]
+            general_elem = sum(v * elem for v, elem in zip(v_trunc, level))
+            new_c_form = wedge(pair.anticanonical_bundle, *level)
+            eqns = [
+                wedge(LieDerivative(general_elem, vf), new_c_form)
+                for vf in pair.vf_basis
+            ]
+            solution = solve_dgcv(
+                eqns, v_trunc, method="linear_parametric", simplify_result=False
+            )
+            gen_solution = subs(general_elem, solution[0])
+            free_vars, var_set = set(), set(v_trunc)
+            for expr in solution[0].values():
+                free_vars |= {
+                    var for var in get_free_symbols(expr) if var in var_set
+                }
+            zeroing = {var: 0 for var in free_vars}
+            new_level = [
+                [
+                    subs(
+                        gen_solution, zeroing | {var: 1}
+                    ).scale_to_polynomial_attempt()
+                    for var in free_vars
+                ]
+            ]
+            lnl = len(new_level[0])
+            if len(level_list[0]) == lnl:
+                return level_list
+            if lnl == 0:
+                return [[]] + level_list
+            level_list = new_level + level_list
+            return descent(level_list, pair, variables)
+
+        return descent(levels, antihol, local_vars)
 
     @property
     def Freeman_filtration_list(self):
@@ -743,6 +1002,52 @@ class CR_structure(dgcv_class):
             return "infinity"
         return self.Freeman_filtration.depth - 1
 
+    def _recover_graph_equations(self):
+        if self._recovered_graph_cache is not None:
+            return self._recovered_graph_cache
+        candidates = []
+        for hv in self.holomorphic_coordinates:
+            rel = vmf_lookup(hv, relatives=True).get("relatives", dict())
+            for key in ("imag", "real"):
+                c = rel.get(key)
+                if c is not None and c not in candidates:
+                    candidates.append(c)
+        recovered = {}
+        used = set()
+        for rho in self._real_defining_equations:
+            found = None
+            for c in candidates:
+                if c in used:
+                    continue
+                a = diff(rho, c)
+                if get_free_symbols(a) or _scalar_is_zero(a):
+                    continue
+                rest = expand(rho - a * c)
+                if c in get_free_symbols(rest):
+                    continue
+                found = (c, -rest / a)
+                break
+            if found is None:
+                self._recovered_graph_cache = False
+                return False
+            used.add(found[0])
+            recovered[found[0]] = found[1]
+        eqns_data = [
+            {"graph_coor": c, "fun_symbols": get_free_symbols(f)}
+            for c, f in recovered.items()
+        ]
+        if _graph_coordinate_order(set(recovered), eqns_data) is None:
+            self._recovered_graph_cache = False
+            return False
+        self._recovered_graph_cache = recovered
+        return recovered
+
+    def _admissible_graph_equations(self):
+        if self.graph_format:
+            return self.graph_equations
+        recovered = self._recover_graph_equations()
+        return recovered if recovered else None
+
     def compute_weighted_symmetries(
         self,
         target_weights,
@@ -753,9 +1058,10 @@ class CR_structure(dgcv_class):
         assume_polynomial: bool = False,
         simplify: bool = False,
     ):
-        if not self.graph_format:
+        graph_eqns = self._admissible_graph_equations()
+        if graph_eqns is None:
             raise RuntimeError(
-                "`CR_structure.compute_weighted_symmetries` is only supported for `CR_structure` instances initialized in a 'graph format'. The `defining_equations` parameter given for instance initialization needs to have been in graph format, meaning as a dictionary whose keys are graphing variables and whose values are functions of other variables."
+                "`compute_weighted_symmetries` needs the defining equations in graph form: each equation solved for one real coordinate, given as a dictionary {coordinate: function}. The given equations could not be rewritten that way."
             )
         if isinstance(target_weights, expr_numeric_types()):
             target_weights = [target_weights]
@@ -794,28 +1100,13 @@ class CR_structure(dgcv_class):
                 f"{', '.join(['[' + str(var) + '] = ' + str(w) for var, w in zip(self.holomorphic_coordinates, coordinate_weights)])}"
             )
             print(" ")
-        for weight in target_weights:
+        def _report_start(weight):
             if report_progress:
                 print(f"Computing symmetries of weight {weight}:")
-            if weight in self._symmetries and caching is True:
-                symmetries[weight] = self._symmetries[weight]
-            else:
-                symmetries[weight] = findWeightedCRSymmetries(
-                    list(self.graph_equations.values()),
-                    holomorphic_coordinates=self.holomorphic_coordinates,
-                    coordinate_weights=coordinate_weights,
-                    symmetry_weight=weight,
-                    graph_variable=list(self.graph_equations.keys()),
-                    returnVectorFieldBasis=True,
-                    degreeCap=degreeCap,
-                    assume_polynomial=assume_polynomial,
-                    simplify=simplify,
-                    parameters=self.parameters if self.parameters else None,
-                )
-                if caching is True:
-                    self._symmetries[weight] = symmetries[weight]
+
+        def _report_done(weight, found):
             if report_progress:
-                number_found = len(symmetries[weight])
+                number_found = len(found)
                 grammar_detail = (
                     ["symmetry", "was"] if number_found == 1 else ["symmetries", "were"]
                 )
@@ -823,6 +1114,50 @@ class CR_structure(dgcv_class):
                     f"{number_found} {grammar_detail[0]} of weight {weight} {grammar_detail[1]} found."
                 )
                 print(" ")
+
+        pending = []
+        for weight in dict.fromkeys(target_weights):
+            if caching is True and weight in self._symmetries:
+                _report_start(weight)
+                _report_done(weight, self._symmetries[weight])
+            else:
+                pending.append(weight)
+        threaded = bool(thread_count())
+        ordered = sorted(pending, key=lambda weight: -weight) if threaded else pending
+        if threaded and report_progress and pending:
+            print(f"Computing symmetries of weights {', '.join(str(w) for w in pending)} in parallel:")
+        computed = dict(
+            zip(
+                ordered,
+                parallel_map(
+                    "cr_weights",
+                    lambda weight: findWeightedCRSymmetries(
+                        list(graph_eqns.values()),
+                        holomorphic_coordinates=self.holomorphic_coordinates,
+                        coordinate_weights=coordinate_weights,
+                        symmetry_weight=weight,
+                        graph_variable=list(graph_eqns.keys()),
+                        returnVectorFieldBasis=True,
+                        degreeCap=degreeCap,
+                        assume_polynomial=assume_polynomial,
+                        simplify=simplify,
+                        parameters=self.parameters if self.parameters else None,
+                    ),
+                    ordered,
+                    min_items=2,
+                    chunk=1,
+                    on_start=None if threaded else _report_start,
+                    on_result=_report_done,
+                ),
+            )
+        )
+        for weight in target_weights:
+            if weight in computed:
+                symmetries[weight] = computed[weight]
+                if caching is True:
+                    self._symmetries[weight] = computed[weight]
+            else:
+                symmetries[weight] = self._symmetries[weight]
         return symmetries
 
 
@@ -940,6 +1275,144 @@ def weightedHomogeneousVF(
     return out
 
 
+
+def _column_assembly(
+    graph_function,
+    graph_variable,
+    holomorphic_coordinates,
+    sym_weight_list,
+    weight_systems,
+    weight_tag,
+    degreeCap,
+    simplify,
+    coord_ri,
+    parameters,
+):
+    coords = tuple(holomorphic_coordinates)
+    terms = []
+    for j in range(len(coords)):
+        degs = [int(d + ws[j]) for d, ws in zip(sym_weight_list, weight_systems)]
+        exps_list = None
+        for k0, w0 in enumerate(weight_systems):
+            sign = 1 if all(w > 0 for w in w0) else -1 if all(w < 0 for w in w0) else 0
+            if sign == 0:
+                continue
+            exps_list = [
+                exps
+                for exps in _weighted_exponent_tuples([sign * w for w in w0], sign * degs[k0])
+                if all(
+                    sum(e * wj for e, wj in zip(exps, weight_systems[k])) == degs[k]
+                    for k in range(len(degs))
+                    if k != k0
+                )
+            ]
+            break
+        if exps_list is None:
+            return None
+        for idx, exps in enumerate(exps_list, start=1):
+            mono = 1
+            for v, e in zip(coords, exps):
+                if e:
+                    mono = mono * v**e
+            terms.append((j, idx, mono))
+    graph_vars = [allToReal(v) for v in _as_list(graph_variable)]
+    graph_defs = [allToReal(f) for f in _as_list(graph_function)]
+    if len(graph_vars) != len(graph_defs):
+        raise ValueError("`graph_variable` and `CR_defining_expr` must have the same length.")
+
+    def restrict(expr):
+        for var, val in zip(graph_vars, graph_defs):
+            expr = subs(expr, {var: val})
+        return expr
+
+    Dz_list = get_VF(*coords)
+    gens = _stable_tuple(sorted(coord_ri, key=str) + list(graph_vars))
+    derivs = []
+    try:
+        for gv, f in zip(graph_vars, graph_defs):
+            rho = gv - f
+            row = []
+            for Dz in Dz_list:
+                d = restrict(Dz(rho))
+                poly_terms(d, gens, assume_polynomial=True, parameters=parameters)
+                row.append(d)
+            derivs.append(row)
+    except PolyBackendError:
+        return None
+    imu = imag_unit()
+    unknowns = [
+        (symbol(f"ALoc{weight_tag}_{j}_{idx}", assumptions={"real": True}), j, mono, False)
+        for j, idx, mono in terms
+    ] + [
+        (symbol(f"BLoc{weight_tag}_{j}_{idx}", assumptions={"real": True}), j, mono, True)
+        for j, idx, mono in terms
+    ]
+
+    split = engine_capability("complex_poly_terms")
+    linear = engine_capability("linear_form")
+
+    def term_columns(entry):
+        j, _idx, mono = entry
+        m_real = restrict(allToReal(mono))
+        real_col = {}
+        imag_col = {}
+        for e, row in enumerate(derivs):
+            prod = m_real * row[j]
+            if simplify:
+                prod = simplify_dgcv(prod)
+            parts = split(prod, gens) if split is not None else None
+            if parts is not None:
+                real_part, imag_part = parts
+                for exps, a in real_part.items():
+                    real_col[(e, exps)] = a
+                for exps, b in imag_part.items():
+                    imag_col[(e, exps)] = -b
+                continue
+            prod = expand(prod)
+            _g, monoms, cs = poly_terms(prod, gens, assume_polynomial=True, parameters=parameters)
+            for exps, c in zip(monoms, cs):
+                a = re(c)
+                b = im(c)
+                if not _scalar_is_zero(a):
+                    real_col[(e, exps)] = a
+                if not _scalar_is_zero(b):
+                    imag_col[(e, exps)] = -b
+        return real_col, imag_col
+
+    try:
+        pairs = parallel_map("cr_columns", term_columns, terms, min_items=16)
+    except PolyBackendError:
+        return None
+    columns = [real for real, _imag in pairs] + [imag for _real, imag in pairs]
+    rows = {}
+    for (u, _j, _m, _i), col in zip(unknowns, columns):
+        for key, c in col.items():
+            rows.setdefault(key, []).append((c, u))
+    eqns = []
+    for key in sorted(rows):
+        expr = linear(rows[key]) if linear is not None else None
+        if expr is None:
+            for c, u in rows[key]:
+                term = c * u
+                expr = term if expr is None else expr + term
+        eqns.append(expr)
+    unknowns_t = _stable_tuple(sorted((u for u, _j, _m, _i in unknowns), key=str))
+    grouped = [[] for _ in coords]
+    for u, j, mono, imaginary in unknowns:
+        grouped[j].append((imu * u if imaginary else u) * mono)
+    coeffs = [zero_form_class._dgcv_multiadd(group) if group else None for group in grouped]
+    vf = None
+    for c, Dz in zip(coeffs, Dz_list):
+        if c is None:
+            continue
+        term = c * Dz
+        vf = term if vf is None else vf + term
+    if vf is None:
+        vf = type(Dz_list[0])(coeff_dict={tuple(): 0}, data_shape="all")
+    solutions = solve_dgcv(eqns, unknowns_t, method="linear_parametric", simplify_result=False)
+    return vf, eqns, unknowns_t, solutions
+
+
 def findWeightedCRSymmetries(
     graph_function,
     holomorphic_coordinates,
@@ -971,6 +1444,8 @@ def findWeightedCRSymmetries(
     if returnAllformats:
         returnVectorFieldBasis = True
 
+    weight_tag = "_" + "_".join(str(w).replace("-", "m").replace("/", "o") for w in sym_weight_list)
+
     def _coord_ri_from_vmf(coords):
         out = set()
         for v in coords:
@@ -988,84 +1463,100 @@ def findWeightedCRSymmetries(
                 out.add(v)
         return out
 
-    vfA = weightedHomogeneousVF(
-        holomorphic_coordinates,
-        sym_weight_list,
-        weight_systems,
-        "ALoc",
-        _tempVar=retrieve_passkey(),
-        degreeCap=degreeCap,
-        assumptions={"real": True},
-    )
-    vfB = weightedHomogeneousVF(
-        holomorphic_coordinates,
-        sym_weight_list,
-        weight_systems,
-        "BLoc",
-        _tempVar=retrieve_passkey(),
-        degreeCap=degreeCap,
-        assumptions={"real": True},
-    )
-
-    vf_candidate_holo = vfA + imag_unit() * vfB
-
-    tan_obst_list = tangencyObstruction(
-        vf_candidate_holo,
-        graph_function,
-        graph_variable,
-        simplify=simplify,
-    )
-
     free = get_free_symbols
     unwrap = _unwrap_symbolic
-
-    var_all = set()
-    for TO in tan_obst_list:
-        var_all.update(free(unwrap(TO)))
-
     coord_ri = _coord_ri_from_vmf(holomorphic_coordinates)
 
-    unknowns = set(var_all) - set(coord_ri)
-    if parameters is not None:
-        unknowns -= set(parameters)
-
-    if coeff_label is None:
-        coeff_label = create_key(prefix="X", key_length=5)
-
-    unknowns_t = _stable_tuple(unknowns)
-
-    graph_vars = _as_list(graph_variable)
-    poly_gens_vars = _stable_tuple(list(coord_ri) + list(graph_vars))
-
-    coef_eqns = []
-    for TO in tan_obst_list:
-        expr = unwrap(TO)
-        expr = allToReal(expr)
-        if not assume_polynomial:
-            expr = as_numer_denom(cancel(expr))[0]
-        expr = expand(expr)
-        P = (
-            expr
-            if query_dgcv_categories(expr, "polynomial")
-            else polynomial_dgcv(expr, poly_gens_vars)
+    column_data = (
+        _column_assembly(
+            graph_function,
+            graph_variable,
+            holomorphic_coordinates,
+            sym_weight_list,
+            weight_systems,
+            weight_tag,
+            degreeCap,
+            simplify,
+            coord_ri,
+            parameters,
         )
-        coef_eqns.extend([allToReal(c) for c in P.get_coeffs(formatting="unformatted")])
-
-    solutions = solve_dgcv(
-        coef_eqns, unknowns_t, method="linear_parametric", simplify_result=False
+        if engine_kind() == "builtin" and degreeCap == 0
+        else None
     )
+    if column_data is not None:
+        vf_candidate_holo, tan_obst_list, unknowns_t, solutions = column_data
+    else:
+        vfA = weightedHomogeneousVF(
+            holomorphic_coordinates,
+            sym_weight_list,
+            weight_systems,
+            "ALoc" + weight_tag,
+            _tempVar=retrieve_passkey(),
+            degreeCap=degreeCap,
+            assumptions={"real": True},
+        )
+        vfB = weightedHomogeneousVF(
+            holomorphic_coordinates,
+            sym_weight_list,
+            weight_systems,
+            "BLoc" + weight_tag,
+            _tempVar=retrieve_passkey(),
+            degreeCap=degreeCap,
+            assumptions={"real": True},
+        )
+
+        vf_candidate_holo = vfA + imag_unit() * vfB
+
+        tan_obst_list = tangencyObstruction(
+            vf_candidate_holo,
+            graph_function,
+            graph_variable,
+            simplify=simplify,
+        )
+
+        var_all = set()
+        for TO in tan_obst_list:
+            var_all.update(free(unwrap(TO)))
+
+        unknowns = set(var_all) - set(coord_ri)
+        if parameters is not None:
+            unknowns -= set(parameters)
+
+        if coeff_label is None:
+            coeff_label = create_key(prefix="X", key_length=5)
+
+        unknowns_t = _stable_tuple(sorted(unknowns, key=str))
+
+        graph_vars = _as_list(graph_variable)
+        poly_gens_vars = _stable_tuple(sorted(coord_ri, key=str) + list(graph_vars))
+
+        coef_eqns = []
+        for TO in tan_obst_list:
+            expr = unwrap(TO)
+            expr = allToReal(expr)
+            if not assume_polynomial:
+                expr = as_numer_denom(cancel(expr))[0]
+            expr = expand(expr)
+            P = (
+                expr
+                if query_dgcv_categories(expr, "polynomial")
+                else polynomial_dgcv(expr, poly_gens_vars)
+            )
+            coef_eqns.extend([allToReal(c) for c in P.get_coeffs(formatting="unformatted")])
+
+        solutions = solve_dgcv(
+            coef_eqns, unknowns_t, method="linear_parametric", simplify_result=False
+        )
 
     if not solutions:
         if len(tan_obst_list) == 0 or all(
             _scalar_is_zero(unwrap(x)) for x in tan_obst_list
         ):
-            clearVar(*listVar(temporary_only=True), report=False)
             if not returnVectorFieldBasis:
                 return [0 for _ in holomorphic_coordinates]
             if returnAllformats:
                 return [0 for _ in holomorphic_coordinates], []
             return []
-        clearVar(*listVar(temporary_only=True), report=False)
         raise ValueError(
             "findWeightedCRSymmetries: no solution to the coefficient system."
         )
@@ -1087,14 +1578,13 @@ def findWeightedCRSymmetries(
         sub_syms.difference_update(parameters)
 
     if not sub_syms:
-        clearVar(*listVar(temporary_only=True), report=False)
         if not returnVectorFieldBasis:
             return VFCLoc
         if returnAllformats:
             return VFCLoc, []
         return []
 
-    sub_syms_t = _stable_tuple(sub_syms)
+    sub_syms_t = _stable_tuple(sorted(sub_syms, key=str))
 
     coeff_vars = tuple(
         symbol(f"{coeff_label}{idx}", assumptions={"real": True})
@@ -1102,8 +1592,6 @@ def findWeightedCRSymmetries(
     )
     repl = dict(zip(sub_syms_t, coeff_vars))
     vf_param = subs(vf_solved, repl)
-
-    clearVar(*listVar(temporary_only=True), report=False)
 
     if not returnVectorFieldBasis:
         return holVF_coeffs(vf_param, holomorphic_coordinates)
@@ -1272,7 +1760,7 @@ def model2Nondegenerate(
                     computed_parameters.add(var)
                     continue
                 if var != holo:
-                    par_warning is True
+                    par_warning = True
                 if holo not in seen:
                     seen.add(holo)
                     kernel_coordinates.append(holo)
@@ -1292,7 +1780,7 @@ def model2Nondegenerate(
             weights = None
         return CR_structure(
             holomorphic_coor,
-            {transverse_coordinate: graph},
+            {tc_info["relatives"]["imag"]: graph},
             parameters=parameters,
             weights=weights,
         )

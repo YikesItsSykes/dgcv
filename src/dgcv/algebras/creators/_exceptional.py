@@ -17,7 +17,7 @@ def _exceptional_cartan_matrix(series_type, rank):
     return tuple(map(tuple, cartan))
 
 
-def _chevalley_structure_data(cartan):
+def _chevalley_structure_data(cartan, cartan_basis="coroots"):
     rank = len(cartan)
     d = [Fraction(1)] + [None] * (rank - 1)
     while None in d:
@@ -117,17 +117,26 @@ def _chevalley_structure_data(cartan):
 
     all_roots = positive + [neg(r) for r in positive]
     index = {r: rank + n for n, r in enumerate(all_roots)}
+    coweights = cartan_basis == "coweights"
     structure_data = {}
     for r in all_roots:
         for i in range(rank):
-            c = sum(r[j] * cartan[i][j] for j in range(rank))
+            if coweights:
+                c = r[i]
+            else:
+                c = sum(r[j] * cartan[i][j] for j in range(rank))
             if c != 0:
                 structure_data[(i, index[r], index[r])] = c
     for r in positive:
         norm = ip(r, r)
+        coroot = [r[i] * 2 * d[i] // norm for i in range(rank)]
+        if coweights:
+            coroot = [
+                sum(coroot[i] * cartan[i][k] for i in range(rank)) for k in range(rank)
+            ]
         for i in range(rank):
-            if r[i] != 0:
-                structure_data[(index[r], index[neg(r)], i)] = r[i] * 2 * d[i] // norm
+            if coroot[i] != 0:
+                structure_data[(index[r], index[neg(r)], i)] = coroot[i]
     for r in all_roots:
         for s in all_roots:
             if index[r] < index[s] and add(r, s) in roots:

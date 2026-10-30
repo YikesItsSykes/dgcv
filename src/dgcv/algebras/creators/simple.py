@@ -4,6 +4,7 @@ from ..._aux._backends._types_and_constants import (
     imag_unit,
     rational,
 )
+from ..._aux._utilities._config import get_dgcv_settings_registry
 from ..._aux._vmf._safeguards import retrieve_passkey
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.combinatorics.combinatorics import carProd
@@ -18,6 +19,7 @@ def createSimpleLieAlgebra(
     build_standard_mat_rep=False,
     return_created_object=False,
     forgo_vmf_registry=False,
+    mint_basis=None,
     **kwargs,
 ):
     """
@@ -54,9 +56,11 @@ def createSimpleLieAlgebra(
       Representation Theory, Springer, 1972, Section 25), with signs fixed on extraspecial pairs and
       propagated by the identities in R. W. Carter, Simple Groups of Lie Type (Wiley, 1972), Chapter 4.
       Simple roots are numbered as in the plates of N. Bourbaki, Lie Groups and Lie Algebras,
-      Chapters 4-6. The basis lists the Cartan subalgebra (simple coroots), then root vectors for
-      the positive roots by height, then for their negatives; the grading records each basis
-      element's coefficients on the simple roots. `build_standard_mat_rep` does not apply to them.
+      Chapters 4-6. The basis lists the Cartan subalgebra (fundamental coweights, as for the
+      classical series; simple coroots under `version_specific_defaults` up to 0.6.0), then root
+      vectors for the positive roots by height, then for their negatives; the grading records each
+      basis element's coefficients on the simple roots. `build_standard_mat_rep` does not apply to
+      them.
     """
     try:
         series_type, rank = series[0], int(series[1:])
@@ -1066,6 +1070,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
         else:
             return createAlgebra(
@@ -1081,6 +1086,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
 
     elif series_type == "B":
@@ -1104,6 +1110,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
         else:
             return createAlgebra(
@@ -1119,6 +1126,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
 
     elif series_type == "C":
@@ -1142,6 +1150,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
         else:
             return createAlgebra(
@@ -1157,6 +1166,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
 
     elif series_type == "D":
@@ -1180,6 +1190,7 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
         else:
             return createAlgebra(
@@ -1195,12 +1206,16 @@ def createSimpleLieAlgebra(
                 },
                 return_created_object=return_created_object,
                 forgo_vmf_registry=forgo_vmf_registry,
+                mint_basis=mint_basis,
             )
 
     elif series_type + str(rank) in {"G2", "F4", "E6", "E7", "E8"}:
         default_label = f"{series_type.lower()}{rank}" if label is None else label
+        cartan_basis = get_dgcv_settings_registry().get(
+            "_exceptional_cartan_basis", "coweights"
+        )
         structure_data, grading = _chevalley_structure_data(
-            _exceptional_cartan_matrix(series_type, rank)
+            _exceptional_cartan_matrix(series_type, rank), cartan_basis=cartan_basis
         )
         passkey = retrieve_passkey()
         return createAlgebra(
@@ -1212,9 +1227,11 @@ def createSimpleLieAlgebra(
             _simple={
                 "lockKey": passkey,
                 "type": [series_type, rank],
+                "cartan_basis": cartan_basis,
             },
             return_created_object=return_created_object,
             forgo_vmf_registry=forgo_vmf_registry,
+            mint_basis=mint_basis,
         )
 
     else:

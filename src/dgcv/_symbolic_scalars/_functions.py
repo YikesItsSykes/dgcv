@@ -18,7 +18,7 @@ from .._aux.printing.printing._string_processing import (
 from ..eds import _zero_forms as _zf_mod
 from ..eds._atoms import zero_form_atom
 from ..eds._constants import PI, E, I, NamedConstant
-from ..eds._zero_forms import _nf_of, zero_form_class
+from ..eds._zero_forms import _base_free_symbols, _nf_of, zero_form_class
 from . import _latex as _latex_mod
 from . import _poly
 from ._factor import _integer_root
@@ -31,6 +31,7 @@ from ._normal_form import (
     RADICAL,
     RF,
     LeafKey,
+    OpaqueLeaf,
     _CompoundLeaf,
     _fold_fraction,
     _leaf_base,
@@ -156,7 +157,16 @@ _HEAD_KIND.update(dict.fromkeys(_INVERSE_HYPERBOLIC, _poly.K_INVERSE_HYPERBOLIC)
 _TEX_MACROS = frozenset(
     {"log", "sin", "cos", "tan", "cot", "sec", "csc", "sinh", "cosh", "tanh", "coth"}
 )
-_NOT_REAL_VALUED = frozenset({"asin", "acos", "acosh", "atanh"})
+_BRANCHED = frozenset({"log", "asin", "acos", "acosh", "atanh"})
+_INTERVAL = {
+    "asin": lambda c: abs(c) <= 1,
+    "acos": lambda c: abs(c) <= 1,
+    "acosh": lambda c: c >= 1,
+    "atanh": lambda c: abs(c) < 1,
+}
+_MOVING = _poly.K_MOVES | _poly.K_IMAGINARY
+_NONNEG = 1
+_POS = 2
 _CONTINUOUS_FROM_BELOW_BEYOND_ONE = frozenset({"asin", "acos", "atanh"})
 _SIN_TABLE = {
     Fraction(0): rf_zero,
@@ -221,6 +231,12 @@ class FunctionAtom(_CompoundLeaf):
             and other.derivs == self.derivs
             and other.args == self.args
         )
+
+    def _kind_bits(self):
+        k = _CompoundLeaf._kind_bits(self)
+        if "real" not in self._markers or k & _MOVING:
+            k |= _poly.K_MOVES
+        return k
 
     def partials(self):
         out = []
@@ -335,29 +351,63 @@ class FunctionAtom(_CompoundLeaf):
 class ElementaryFunction(_CompoundLeaf):
     __hash__ = _CompoundLeaf.__hash__
 
-    def __init__(self, name, arg):
+    def __init__(self, name, arg, conjugated=False):
         self.name = name
         self.args = (arg,)
-        self._hash = hash(("dgcv.builtin.elementary", name, arg))
+        self.conjugated = conjugated
+        key = ("dgcv.builtin.elementary", name, arg)
+        self._hash = hash(key + (True,)) if conjugated else hash(key)
 
     def __eq__(self, other):
         return (
             isinstance(other, ElementaryFunction)
             and other.name == self.name
+            and other.conjugated == self.conjugated
             and other.args == self.args
         )
 
+    def plain(self):
+        return ElementaryFunction(self.name, self.args[0])
+
+    @property
+    def free_symbols(self):
+        if self.conjugated:
+            return _base_free_symbols(base_from_nf(conj_rf(self._arg_rf())))
+        return _CompoundLeaf.free_symbols.fget(self)
+
     def _kind_bits(self):
-        return _HEAD_KIND[self.name] | self._arg_rf().kinds()
+        arg = self._arg_rf()
+        argk = arg.kinds()
+        k = _HEAD_KIND[self.name] | argk
+        if self.conjugated:
+            return k | _poly.K_CONJUGATED | _poly.K_MOVES
+        if argk & _MOVING or not _real_on_argument(self.name, arg):
+            k |= _poly.K_MOVES
+        return k
 
     def partials(self):
-        return [(_derivative(self.name, self, self._arg_rf()), self.args[0])]
+        arg = self._arg_rf()
+        if self.conjugated:
+            coeff = conj_rf(_derivative(self.name, self.plain(), arg))
+            return [(coeff, base_from_nf(conj_rf(arg)))]
+        return [(_derivative(self.name, self, arg), self.args[0])]
 
     def with_args(self, new_args):
-        return elementary(self.name, _nf_of(to_active_engine(new_args[0])))
+        out = elementary(self.name, _nf_of(to_active_engine(new_args[0])))
+        return conj_rf(out) if self.conjugated else out
 
     def conj_rf(self):
-        return elementary(self.name, conj_rf(self._arg_rf()))
+        if self.conjugated:
+            return rf_gen(self.plain())
+        arg = self._arg_rf()
+        if self.name in _BRANCHED:
+            if _real_on_argument(self.name, arg):
+                return rf_gen(self)
+            return _flagged_elementary(self.name, arg, self.args[0])
+        c = conj_rf(arg)
+        if c.equal(arg):
+            return rf_gen(self)
+        return elementary(self.name, c)
 
     def _tex_head(self):
         if self.name in _TEX_MACROS:
@@ -367,58 +417,92 @@ class ElementaryFunction(_CompoundLeaf):
     def _latex(self, printer=None, raw=True, **kwargs):
         tex = _arg_tex(self.args[0])
         if self.name == "exp":
-            return f"e^{{{tex}}}"
-        return f"{self._tex_head()}\\left({tex}\\right)"
+            out = f"e^{{{tex}}}"
+        else:
+            out = f"{self._tex_head()}\\left({tex}\\right)"
+        return f"\\overline{{{out}}}" if self.conjugated else out
 
     def _power_latex(self, e):
+        if self.conjugated:
+            return latex_superscript(self._latex(), str(e))
         if self.name == "exp":
             return f"e^{{{nf_latex(self._arg_rf() * rf_number(e))}}}"
         tex = _arg_tex(self.args[0])
         return f"{latex_superscript(self._tex_head(), str(e))}\\left({tex}\\right)"
 
     def __str__(self):
-        return f"{self.name}({_arg_str(self.args[0])})"
+        out = f"{self.name}({_arg_str(self.args[0])})"
+        return f"conjugate({out})" if self.conjugated else out
 
     def _sort_key(self):
         rank = ELEMENTARY_NAMES.index(self.name)
-        return LeafKey(False, ELEMENTARY, rank, (), 0, _arg_str(self.args[0]))
+        return LeafKey(self.conjugated, ELEMENTARY, rank, (), 0, _arg_str(self.args[0]))
 
 
 class Radical(_CompoundLeaf):
     __hash__ = _CompoundLeaf.__hash__
     _head_kind = _poly.K_RADICAL
 
-    def __init__(self, arg, q):
+    def __init__(self, arg, q, conjugated=False):
         self.args = (arg,)
         self.q = int(q)
-        self._hash = hash(("dgcv.builtin.radical", self.q, arg))
+        self.conjugated = conjugated
+        key = ("dgcv.builtin.radical", self.q, arg)
+        self._hash = hash(key + (True,)) if conjugated else hash(key)
 
     def __eq__(self, other):
         return (
-            isinstance(other, Radical) and other.q == self.q and other.args == self.args
+            isinstance(other, Radical)
+            and other.q == self.q
+            and other.conjugated == self.conjugated
+            and other.args == self.args
         )
 
+    def plain(self):
+        return Radical(self.args[0], self.q)
+
+    @property
+    def free_symbols(self):
+        if self.conjugated:
+            return _base_free_symbols(base_from_nf(conj_rf(self._arg_rf())))
+        return _CompoundLeaf.free_symbols.fget(self)
+
+    def _kind_bits(self):
+        arg = self._arg_rf()
+        argk = arg.kinds()
+        k = _poly.K_RADICAL | argk
+        if self.conjugated:
+            return k | _poly.K_CONJUGATED | _poly.K_MOVES
+        if argk & _MOVING or not _sign(arg):
+            k |= _poly.K_MOVES
+        return k
+
     def partials(self):
-        return [
-            (
-                rf_one() / (rf_number(self.q) * rf_gen(self) ** (self.q - 1)),
-                self.args[0],
-            )
-        ]
+        chain = self.args[0]
+        if self.conjugated:
+            chain = base_from_nf(conj_rf(self._arg_rf()))
+        return [(rf_one() / (rf_number(self.q) * rf_gen(self) ** (self.q - 1)), chain)]
 
     def with_args(self, new_args):
-        return radical(_nf_of(to_active_engine(new_args[0])), self.q)
+        out = radical(_nf_of(to_active_engine(new_args[0])), self.q)
+        return conj_rf(out) if self.conjugated else out
 
     def conj_rf(self):
-        return radical(conj_rf(self._arg_rf()), self.q)
+        if self.conjugated:
+            return rf_gen(self.plain())
+        arg = self._arg_rf()
+        if _sign(arg):
+            return rf_gen(self)
+        return _flagged_radical(self.args[0], arg, self.q)
 
     def _latex(self, printer=None, raw=True, **kwargs):
         tex = _arg_tex(self.args[0])
-        if self.q == 2:
-            return f"\\sqrt{{{tex}}}"
-        return f"\\sqrt[{self.q}]{{{tex}}}"
+        out = f"\\sqrt{{{tex}}}" if self.q == 2 else f"\\sqrt[{self.q}]{{{tex}}}"
+        return f"\\overline{{{out}}}" if self.conjugated else out
 
     def _power_latex(self, e):
+        if self.conjugated:
+            return latex_superscript(self._latex(), str(e))
         arg = self.args[0]
         frac = f"\\frac{{{e}}}{{{self.q}}}"
         if isinstance(arg, zero_form_atom):
@@ -427,20 +511,25 @@ class Radical(_CompoundLeaf):
 
     def __str__(self):
         s = _arg_str(self.args[0])
-        if self.q == 2:
-            return f"sqrt({s})"
-        return f"({s})**(1/{self.q})"
+        out = f"sqrt({s})" if self.q == 2 else f"({s})**(1/{self.q})"
+        return f"conjugate({out})" if self.conjugated else out
 
     def _sort_key(self):
         arg = self.args[0]
 
         if isinstance(arg, zero_form_atom):
-            return _leaf_sort_key(_poly.gen_id(arg))._replace(order=self.q)
+            gid = _poly.known_gen_id(arg)
+            if gid is None:
+                gid = _poly.gen_id(arg)
+            key = _leaf_sort_key(gid)._replace(order=self.q)
+            return key._replace(conjugated=True) if self.conjugated else key
 
         if isinstance(arg, numbers.Number):
-            return LeafKey(False, NUMBER_RADICAL, 0, natural_key(str(arg)), self.q, "")
+            return LeafKey(
+                self.conjugated, NUMBER_RADICAL, 0, natural_key(str(arg)), self.q, ""
+            )
 
-        return LeafKey(False, RADICAL, 0, (), self.q, _arg_str(arg))
+        return LeafKey(self.conjugated, RADICAL, 0, (), self.q, _arg_str(arg))
 
 
 class FunctionHead:
@@ -894,7 +983,7 @@ def _log_special(mn, sn, md, sd):
     if g == _poly.I_GEN and sn in (1, -1):
         return rf_gen(I) * rf_gen(PI) * rf_number(Fraction(sn, 2))
     leaf = _poly.gen_leaf(g)
-    if sn == 1 and isinstance(leaf, Radical):
+    if sn == 1 and isinstance(leaf, Radical) and not leaf.conjugated:
         return elementary("log", leaf._arg_rf()) * rf_number(Fraction(e, leaf.q))
     return None
 
@@ -946,7 +1035,10 @@ def elementary(name, rf):
                 return val
 
     leaf = _single_gen(rf)
-    if leaf is not None:
+    if leaf is not None and getattr(leaf, "conjugated", False):
+        if name not in _BRANCHED:
+            return conj_rf(elementary(name, rf_gen(leaf.plain())))
+    elif leaf is not None:
         if name == "log" and leaf == E:
             return rf_one()
         if isinstance(leaf, ElementaryFunction):
@@ -1072,7 +1164,7 @@ def _radical_core(core, q):
         if c == 1:
             if len(m) == 1:
                 leaf = _poly.gen_leaf(m[0][0])
-                if isinstance(leaf, Radical):
+                if isinstance(leaf, Radical) and not leaf.conjugated:
                     return radical(leaf._arg_rf(), leaf.q * q) ** m[0][1]
             out = None
             rest = []
@@ -1104,6 +1196,36 @@ def _radical_leaf(core, q):
     if core.is_constant:
         _mergeable[0] = True
     return rf_gen(leaf)
+
+
+def _flagged_radical(base, core, q):
+    leaf = Radical(base, q, True)
+    gid = _poly.gen_id(leaf)
+    if gid not in _poly.REDUCTIONS:
+        _poly.register_reduction(gid, q, lambda core=core: conj_rf(core))
+        _poly.register_graded(
+            gid,
+            ("radical_conj", base),
+            q,
+            lambda index, base=base, core=core: _flagged_radical(base, core, index),
+        )
+    return rf_gen(leaf)
+
+
+def _flagged_elementary(name, rf, base):
+    leaf = ElementaryFunction(name, base, True)
+    if _FAMILY.get(name) != "arcsine":
+        return rf_gen(leaf)
+    gid = _poly.gen_id(leaf)
+    if gid not in _poly.GEN_GROUP:
+        factory = None
+        if name == "acos":
+
+            def factory(rf=rf):
+                return _half_pi() - conj_rf(elementary("asin", rf))
+
+        _poly.register_family(gid, "arcsine_conj", base, factory)
+    return RF(_poly.p_gen(gid), canonical=True)
 
 
 def radical(rf, q):
@@ -1141,27 +1263,97 @@ def radical(rf, q):
 
 
 def _all_real(rf):
-    for g in rf.gens():
-        if g == _poly.I_GEN:
-            return False
-        leaf = _poly.gen_leaf(g)
-        if isinstance(leaf, zero_form_atom):
-            if not (leaf.role in ("real", "imaginary") or "real" in leaf._markers):
-                return False
-        elif isinstance(leaf, ElementaryFunction):
-            if leaf.name in _NOT_REAL_VALUED or not _all_real(leaf._arg_rf()):
-                return False
-        elif isinstance(leaf, FunctionAtom):
-            if "real" not in leaf._markers or not all(
-                _all_real(nf_from_base(a)) for a in leaf.args
-            ):
-                return False
-        elif isinstance(leaf, NamedConstant):
-            continue
-        else:
-            return False
+    return not rf.kinds() & _MOVING
 
-    return True
+
+def _real_on_argument(name, rf):
+    if name not in _BRANCHED:
+        return True
+    if name == "log":
+        return _sign(rf) == _POS
+    if rf.is_constant:
+        v = rf.constant_value()
+        return isinstance(v, numbers.Real) and _INTERVAL[name](v)
+    return False
+
+
+def _sign(rf):
+    if rf.is_constant:
+        v = rf.constant_value()
+        if not isinstance(v, numbers.Real):
+            return 0
+        return _POS if v > 0 else (_NONNEG if v == 0 else 0)
+    rf.kinds()
+    n = _poly_sign(rf.num)
+    if n and _poly_sign(rf.den) == _POS:
+        return n
+    return 0
+
+
+def _poly_sign(p):
+    out = 0
+    for m, c in p.items():
+        if not isinstance(c, numbers.Real) or c <= 0:
+            return 0
+        s = _mono_sign(m)
+        if not s:
+            return 0
+        if s > out:
+            out = s
+    return out
+
+
+def _mono_sign(m):
+    kind = _poly.GEN_KIND
+    out = _POS
+    skip = ()
+    for g, e in m:
+        if g in skip:
+            continue
+        if kind[g] & _MOVING:
+            partner = _partner_in(_poly.gen_leaf(g), m, e)
+            if partner is None:
+                return 0
+            skip += (partner,)
+            s = _NONNEG
+        elif e % 2 == 0:
+            s = _NONNEG
+        else:
+            s = _real_leaf_sign(_poly.gen_leaf(g))
+            if not s:
+                return 0
+        if s < out:
+            out = s
+    return out
+
+
+def _partner_in(leaf, m, e):
+    if not isinstance(leaf, zero_form_atom):
+        return None
+    partner = leaf.conjugate_atom()
+    if partner is None:
+        return None
+    gid = _poly._gen_ids.get(partner)
+    if gid is None or (gid, e) not in m:
+        return None
+    return gid
+
+
+def _real_leaf_sign(leaf):
+    if isinstance(leaf, zero_form_atom):
+        a = leaf.assumptions
+        if "positive" in a:
+            return _POS
+        if "nonnegative" in a:
+            return _NONNEG
+        return 0
+    if leaf == E or leaf == PI:
+        return _POS
+    if isinstance(leaf, ElementaryFunction):
+        return _POS if leaf.name in ("exp", "cosh") else 0
+    if isinstance(leaf, Radical):
+        return _sign(leaf._arg_rf())
+    return 0
 
 
 def _is_exp_leaf(leaf):
@@ -1291,13 +1483,18 @@ def display_base(zf):
 def _leaf_kind(leaf):
     if isinstance(leaf, zero_form_atom):
         role = leaf.role
+        k = 0
         if role == "antiholomorphic" or (
             role == "standard" and leaf.label.startswith(conjugation_prefix())
         ):
-            return _poly.K_CONJUGATED
-        return 0
+            k = _poly.K_CONJUGATED
+        if not (role in ("real", "imaginary") or "real" in leaf._markers):
+            k |= _poly.K_MOVES
+        return k
     bits = getattr(leaf, "_kind_bits", None)
-    return bits() if bits is not None else 0
+    if bits is not None:
+        return bits()
+    return _poly.K_MOVES if isinstance(leaf, OpaqueLeaf) else 0
 
 
 _poly.leaf_kind = _leaf_kind

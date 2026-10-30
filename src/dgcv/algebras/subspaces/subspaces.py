@@ -109,7 +109,7 @@ class algebra_subspace_class(_vector_space_methods, dgcv_class):
         self._is_subalgebra = None
 
     def _class_builder(self, coeff_dict, valence):
-        return self.ambient._class_builder(self, coeff_dict, valence)
+        return self.ambient._class_builder(coeff_dict, valence)
 
     def contains(self, items, return_basis_coeffs=False, strict_types=False):
         if isinstance(items, (list, tuple)):

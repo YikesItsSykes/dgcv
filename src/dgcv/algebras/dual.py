@@ -24,11 +24,25 @@ from .linear_algebra import (
 class algebra_dual(dgcv_class):
     def __init__(self, alg, invert_grad_weights=True):
         object.__setattr__(self, "dual_algebra", alg)
-        object.__setattr__(self, "basis", tuple([elem.dual() for elem in alg.basis]))
+        basis = alg.basis
+        object.__setattr__(
+            self,
+            "basis",
+            basis.dual_view()
+            if hasattr(basis, "dual_view")
+            else tuple([elem.dual() for elem in basis]),
+        )
         object.__setattr__(self, "label", alg.label + "_dual")
         if invert_grad_weights is not False:
             object.__setattr__(
-                self, "grading", [tuple(-j for j in elem) for elem in alg.grading]
+                self,
+                "grading",
+                [
+                    elem.negated()
+                    if hasattr(elem, "negated")
+                    else tuple(-j for j in elem)
+                    for elem in alg.grading
+                ],
             )
         object.__setattr__(self, "_dgcv_categories", {"algebra_dual"})
 

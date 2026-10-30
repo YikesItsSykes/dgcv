@@ -261,11 +261,13 @@ def get_free_symbols(expr):
     return set()
 
 
-def simplify(expr, method=None, try_hard=False, **kwargs):
+def simplify(expr, method=None, try_hard=False, reflect_conjugation=False, **kwargs):
     expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_simplify__", None)
     if callable(f):
         try:
+            if reflect_conjugation:
+                kwargs = dict(kwargs, reflect_conjugation=True)
             if try_hard:
                 return f(method=method, try_hard=True, **kwargs)
             return f(method=method, **kwargs)

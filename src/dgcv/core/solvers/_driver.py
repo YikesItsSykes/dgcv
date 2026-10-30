@@ -29,6 +29,7 @@ def solve_dgcv(
     allow_underdetermined_solution=True,
     simplify_pivots=False,
     surface_singularities=False,
+    preprocess_only=False,
 ):
     """
     Solve an equation system for the given variables.
@@ -67,6 +68,10 @@ def solve_dgcv(
         Assume a linear system and use dgcv's own solver, forcing
         `simplify_pivots` and `return_divisors` to True and normalizing the
         returned divisors.
+    preprocess_only : bool, default False
+        Return the preprocessed system ``(equations, variables)`` in the active
+        engine's scalars, exactly as it would be handed to a solver, instead of
+        solving it.
 
     Returns
     -------
@@ -99,6 +104,10 @@ def solve_dgcv(
             print("[solve_dgcv]", *a)
 
     if isinstance(eqns, (list, tuple)) and len(eqns) == 0:
+        if preprocess_only:
+            if isinstance(vars_to_solve, (list, tuple)):
+                return [], list(vars_to_solve)
+            return [], [] if vars_to_solve is None else [vars_to_solve]
         if isinstance(vars_to_solve, (list, tuple)):
             out = [{var: var for var in vars_to_solve}]
         elif isinstance(vars_to_solve, expr_numeric_types()):
@@ -111,6 +120,8 @@ def solve_dgcv(
     processed_eqns, system_vars, extra_vars, bridge = _equations_preprocessing(
         eqns, vars_to_solve
     )
+    if preprocess_only:
+        return list(processed_eqns), list(system_vars)
 
     def _simplify(x):
         if not simplify_result:

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import numbers
 
+import threading
+
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._symbolic_router import (
     _scalar_is_one,
     _scalar_is_zero,
@@ -26,7 +29,7 @@ from ..linear_algebra import (
 from ..saec import subalgebra_element
 from ..subspaces import algebra_subspace_class
 from ..threads import _algebra_methods, killingForm
-from ..threads.util import _span_solver
+from ..threads.util import _extract_basis, _span_solver
 
 
 class subalgebra_class(_algebra_methods, algebra_subspace_class):
@@ -195,6 +198,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
     def structureData(self, value):
         self._structure_data = value
         self._structure_data_dict = None
+        self._structure_rows_cache = None
         self._lazy_structure_data = False
 
     @property
@@ -210,6 +214,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
     @structureDataDict.setter
     def structureDataDict(self, value):
         self._structure_data_dict = value
+        self._structure_rows_cache = None
 
     def _materialize_structure_data(self):
         self._is_subalgebra = None
@@ -217,6 +222,7 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
             "structure_data"
         ]
         self._structure_data_dict = None
+        self._structure_rows_cache = None
         self._lazy_structure_data = False
         self._lazy_rows = None
         if self._parameters and "structure" not in self._singularities:
@@ -226,33 +232,36 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
 
     def _structure_row(self, idx1, idx2):
         if not self._lazy_structure_data:
-            return self.structureData[idx1, idx2]
+            return self._structure_rows.get((idx1, idx2), {})
         rows = self._lazy_rows
         if rows is None:
             solver = _span_solver.build(list(self.basis_in_ambient_alg))
             if solver is None:
-                return self.structureData[idx1, idx2]
-            rows = self._lazy_rows = {"solver": solver, "skew": None}
+                return self._structure_rows.get((idx1, idx2), {})
+            rows = self._lazy_rows = {"solver": solver, "skew": None, "lock": threading.Lock()}
         row = rows.get((idx1, idx2))
         if row is not None:
             return row
-        amb = self.basis_in_ambient_alg
-        product = amb[idx1] * amb[idx2]
-        out = rows["solver"].reduce(product, return_decomp_coeffs=True)
-        if out is None:
-            return self.structureData[idx1, idx2]
-        if out[0] is True:
-            raise TypeError(
-                "The basis of this lazily constructed subalgebra does not span a subalgebra."
-            )
-        coeffs = {k: v for k, v in out[1][0].items() if not _scalar_is_zero(v)}
-        row = matrix_dgcv(coeffs, shape=(self.dimension, 1))
-        rows[(idx1, idx2)] = row
-        if rows["skew"] is None:
-            rows["skew"] = self.ambient.is_skew_symmetric() is True
-        if rows["skew"] and idx1 != idx2:
-            rows[(idx2, idx1)] = -row
-        return row
+        with rows["lock"]:
+            row = rows.get((idx1, idx2))
+            if row is not None:
+                return row
+            amb = self.basis_in_ambient_alg
+            product = amb[idx1] * amb[idx2]
+            out = rows["solver"].reduce(product, return_decomp_coeffs=True)
+            if out is None:
+                return self._structure_rows.get((idx1, idx2), {})
+            if out[0] is True:
+                raise TypeError(
+                    "The basis of this lazily constructed subalgebra does not span a subalgebra."
+                )
+            row = {k: v for k, v in out[1][0].items() if not _scalar_is_zero(v)}
+            rows[(idx1, idx2)] = row
+            if rows["skew"] is None:
+                rows["skew"] = self.ambient.is_skew_symmetric() is True
+            if rows["skew"] and idx1 != idx2:
+                rows[(idx2, idx1)] = {k: -v for k, v in row.items()}
+            return row
 
     @property
     def zero_element(self):
@@ -558,8 +567,28 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         list
             A subset of the input elements that are linearly independent and unique.
         """
+        if (
+            not self._lazy_structure_data
+            and not self._parameters
+            and not surface_singularities
+            and not force_heavy_solve
+            and isinstance(elements, (list, tuple))
+            and elements
+            and all(
+                get_dgcv_category(elem) == "subalgebra_element" and elem.algebra is self
+                for elem in elements
+            )
+        ):
+            _, idx_list = _extract_basis(
+                list(elements),
+                ALBS=apply_light_basis_simplification,
+                return_indices=True,
+            )
+            if return_indices is True:
+                return idx_list
+            return [elements[idx] for idx in idx_list]
         out = self.ambient.filter_independent_elements(
-            [elem.ambient_rep for elem in elements],
+            parallel_map("ambient_reps", lambda elem: elem.ambient_rep, elements, min_items=256),
             apply_light_basis_simplification=apply_light_basis_simplification,
             return_indices=True,
             surface_singularities=surface_singularities,
@@ -840,6 +869,4 @@ class subalgebra_class(_algebra_methods, algebra_subspace_class):
         return NotImplemented
 
     def __rmatmul__(self, other):
-        if isinstance(other, expr_numeric_types()):
-            return self._convert_to_tp().__rmatmul__(other)
         return NotImplemented

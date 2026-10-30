@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..._aux._backends._parallel import parallel_map
 from ..._aux._backends._engine import engine_capability
 from ..._aux._backends._symbolic_router import (
     _scalar_is_zero,
@@ -172,7 +173,44 @@ class filtration_class(dgcv_class):
                 deps = (
                     [dependence(vf) for vf in vfb] if dependence is not None else None
                 )
-                _prepared_prefix_spans(vfb, self.growth_vector)
+                prefix_entries = _prepared_prefix_spans(vfb, self.growth_vector)
+                work = []
+                for c1, vf1 in enumerate(vfb):
+                    d1 = deps[c1] if deps is not None else None
+                    for c, vf2 in enumerate(vfb[c1 + 1 :]):
+                        c2 = c1 + 1 + c
+                        level = levels[c1] + levels[c2]
+                        if level > self.depth:
+                            continue
+                        l_idx = level - 1
+                        ld = 0 if l_idx == 0 else self.growth_vector[l_idx - 1]
+                        ld_inc = self.growth_vector[l_idx]
+                        d2 = deps[c2] if deps is not None else None
+                        if (
+                            d1 is not None
+                            and d2 is not None
+                            and d1[0].isdisjoint(d2[1])
+                            and d2[0].isdisjoint(d1[1])
+                        ):
+                            continue
+                        work.append((c1, c2, ld, ld_inc))
+                safe = prefix_entries is not None and all(
+                    entry is not None and entry[0].thread_safe for entry in prefix_entries
+                )
+
+                def _pair_block(item):
+                    c1, c2, ld, ld_inc = item
+                    bracket = LieDerivative(vfb[c1], vfb[c2])
+                    return bracket, _decompose_prepared(bracket, vfb[:ld_inc], range(ld, ld_inc))
+
+                blocks = dict(
+                    zip(
+                        work,
+                        parallel_map("torsion_pairs", _pair_block, work, min_items=16)
+                        if safe
+                        else [_pair_block(item) for item in work],
+                    )
+                )
                 for c1, vf1 in enumerate(vfb):
                     d1 = deps[c1] if deps is not None else None
                     for c, vf2 in enumerate(vfb[c1 + 1 :]):
@@ -198,10 +236,7 @@ class filtration_class(dgcv_class):
                                 nft[c1, c2] = nc
                                 nft[c2, c1] = -nc
                                 continue
-                            bracket = LieDerivative(vf1, vf2)
-                            block = _decompose_prepared(
-                                bracket, vfb[:ld_inc], range(ld, ld_inc)
-                            )
+                            bracket, block = blocks[(c1, c2, ld, ld_inc)]
                             if block is not None:
                                 nc = matrix_dgcv(
                                     {
