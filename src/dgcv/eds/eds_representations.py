@@ -26,15 +26,80 @@ import numbers
 from .._aux._backends._cls_coercion import register_legacy_sympy_class
 from .._aux._backends._display import latex as _routed_latex
 from .._aux._backends._engine import engine_kind
-from .._aux._backends._symbolic_router import _scalar_is_zero
+from .._aux._backends._symbolic_router import (
+    _scalar_is_zero,
+    is_zero_knowing_zero_is_expected,
+)
 from .._aux._backends._symbolic_router import conjugate as _routed_conjugate
 from .._aux._backends._symbolic_router import simplify as _routed_simplify
-from .._aux._backends._types_and_constants import expr_numeric_types
-from .._aux._vmf._safeguards import retrieve_passkey
+from .._aux._backends._types_and_constants import expr_numeric_types, rational
+from .._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
+from ..algebras.aec import algebra_element_class
+from ..core.arrays import matrix_dgcv
 from ..core.base import dgcv_class
 from ._atoms import _zero_obstruction, zero_form_atom
-from ._forms import abstract_differential_form, abstract_differential_form_atom, abstract_differential_form_monomial
+from ._calculus import _conjugate_closure, _simplify_under_constraints, extDer
+from ._forms import (
+    abstract_differential_form,
+    abstract_differential_form_atom,
+    abstract_differential_form_monomial,
+)
 from ._zero_forms import zero_form_class
+
+_EDS_CLASSES = (
+    zero_form_class,
+    zero_form_atom,
+    abstract_differential_form_atom,
+    abstract_differential_form_monomial,
+    abstract_differential_form,
+)
+
+
+def _conjugate_entry(expr):
+    if isinstance(expr, _EDS_CLASSES):
+        return expr._eval_conjugate()
+    return _routed_conjugate(expr)
+
+
+def _subs_entry(expr, subs_data, with_diff_corollaries):
+    if hasattr(expr, "_subs_dgcv"):
+        return expr._subs_dgcv(
+            subs_data,
+            with_diff_corollaries=with_diff_corollaries,
+            with_conjugates=False,
+        )
+    if hasattr(expr, "subs"):
+        return expr.subs(subs_data)
+    return expr
+
+
+def _canonicalize_entry(expr, depth):
+    if hasattr(expr, "_eval_canonicalize"):
+        return expr._eval_canonicalize(depth=depth)
+    return expr
+
+
+def _form_coefficient(entry, form):
+    if hasattr(entry, "coefficient") and hasattr(entry, "degree"):
+        return entry.coefficient(form)
+    return 0
+
+
+def _unit_forms(entries):
+    found = []
+    for entry in entries:
+        if not (hasattr(entry, "coefficients") and hasattr(entry, "degree")):
+            continue
+        for key in entry.coefficients():
+            if len(key) == 1 and key[0] not in found:
+                found.append(key[0])
+    coframes = {getattr(form, "primary_coframe", None) for form in found}
+    if len(coframes) == 1:
+        cf = coframes.pop()
+        if cf is not None:
+            ordered = [form for form in cf.forms if form in found]
+            return tuple(ordered + [form for form in found if form not in ordered])
+    return tuple(found)
 
 
 class DF_representation(dgcv_class):
@@ -48,6 +113,7 @@ class DF_representation(dgcv_class):
         return self.applyfunc(lambda entry: func(entry, **kwargs))
 
     def __dgcv_solve_bridge__(self, bridge):
+        bridge.note_eds_forms()
         lowered = []
         for entry in self:
             lowered += bridge.lower(entry)
@@ -207,10 +273,11 @@ class DF_representation(dgcv_class):
         return DF_representation(self.row_count, self.col_count, new_data)
 
     def __mul__(self, scalar):
-        if not isinstance(scalar, (zero_form_class, zero_form_atom)) or isinstance(
-            scalar, expr_numeric_types()
+        if not (
+            isinstance(scalar, (zero_form_class, zero_form_atom))
+            or isinstance(scalar, expr_numeric_types())
         ):
-            raise TypeError("Can only multiply by scalar values")
+            return NotImplemented
         new_data = [
             [scalar * self.array[i][j] for j in range(self.col_count)]
             for i in range(self.row_count)
@@ -250,6 +317,10 @@ class DF_representation(dgcv_class):
                 fs_set = fs_set | entry.free_symbols
         return fs_set
 
+    @property
+    def is_zero(self):
+        return all(is_zero_knowing_zero_is_expected(entry) for entry in self)
+
     def _latex(self, printer=None, raw=True, **kwargs):
         rows = []
         for row in self.array:
@@ -276,23 +347,17 @@ class DF_representation(dgcv_class):
     def _dgcv_eds_applyfunc(self, func):
         return self.applyfunc(func)
 
-    def _eval_conjugate(self):
-        def _custom_conj(expr):
-            if isinstance(
-                expr,
-                (
-                    zero_form_class,
-                    zero_form_atom,
-                    abstract_differential_form_atom,
-                    abstract_differential_form_monomial,
-                    abstract_differential_form,
-                ),
-            ):
-                return expr._eval_conjugate()
-            else:
-                return _routed_conjugate(expr)
+    def curvature(self, with_simplify=False):
+        out = extDer(self) + self @ self
+        return _routed_simplify(out) if with_simplify else out
 
-        return self.applyfunc(_custom_conj)
+    def bianchi(self, curvature=None, with_simplify=False):
+        K = self.curvature() if curvature is None else curvature
+        out = extDer(K) + self @ K - K @ self
+        return _routed_simplify(out) if with_simplify else out
+
+    def _eval_conjugate(self):
+        return self.applyfunc(_conjugate_entry)
 
     def _eval_simplify(
         self,
@@ -304,6 +369,10 @@ class DF_representation(dgcv_class):
         expand=False,
         **kwargs,
     ):
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kwargs)
         opts = (
             dict(
                 ratio=ratio,
@@ -315,34 +384,183 @@ class DF_representation(dgcv_class):
                 **kwargs,
             )
             if engine_kind() == "sympy"
-            else {}
+            else dict(kwargs)
         )
         return self.applyfunc(lambda entry: _routed_simplify(entry, **opts))
 
     def _eval_canonicalize(self, depth=1000):
-        def _canon(obj):
-            if hasattr(obj, "_eval_canonicalize"):
-                return obj._eval_canonicalize(depth=depth)
-            return obj
+        return self.applyfunc(lambda entry: _canonicalize_entry(entry, depth))
 
-        return self.applyfunc(_canon)
-
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
         # an alias for regular subs so that other functions can know the with_diff_corollaries keyword is available
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, subs_data, with_diff_corollaries=False):
-        def _custom_subs(expr):
-            if hasattr(expr, "_subs_dgcv"):
-                return expr._subs_dgcv(
-                    subs_data, with_diff_corollaries=with_diff_corollaries
-                )
-            if hasattr(expr, "subs"):
-                return expr.subs(subs_data)
-            else:
-                return expr
-
-        return self.applyfunc(_custom_subs)
+    def subs(self, subs_data, with_diff_corollaries=False, with_conjugates=None):
+        close = with_diff_corollaries if with_conjugates is None else with_conjugates
+        if close and isinstance(subs_data, dict):
+            subs_data = _conjugate_closure(subs_data, "subs")
+        return self.applyfunc(
+            lambda entry: _subs_entry(entry, subs_data, with_diff_corollaries)
+        )
 
 
 register_legacy_sympy_class(DF_representation)
+
+
+class connection_form(dgcv_class):
+    _dgcv_class_check = retrieve_passkey()
+    _dgcv_category = "connection_form"
+
+    def __init__(self, data, algebra=None):
+        category = get_dgcv_category(data)
+        if category == "abst_coframe":
+            algebra = data.algebra if algebra is None else algebra
+            if algebra is None:
+                raise TypeError(
+                    "`connection_form(CF)` needs the algebra the coframe takes values in: pass `algebra=g` "
+                    "(`createAlgebra(CF, 'g')` for a coframe with constant structure coefficients, "
+                    "`createAlgebra(CF.subs({...}), 'g')` with the curvature functions set to 0 otherwise)"
+                )
+            if get_dgcv_category(algebra) != "algebra":
+                raise TypeError("`algebra` must be a dgcv algebra created with `createAlgebra`")
+            if algebra.dimension != data.dimension:
+                raise ValueError(
+                    f"the coframe has {data.dimension} forms but the algebra has dimension {algebra.dimension}"
+                )
+            value = algebra_element_class(algebra, list(data.forms), 1)
+        elif algebra is not None:
+            raise TypeError("`algebra=` goes with a coframe; the other inputs carry their own algebra or none")
+        elif category == "algebra_element":
+            value, algebra = data, data.algebra
+        elif isinstance(data, DF_representation):
+            value = data
+        elif isinstance(data, (list, tuple, dict)):
+            value = DF_representation(data)
+        else:
+            raise TypeError(
+                "`connection_form` takes a coframe (with `algebra=`), an algebra element with 1-form "
+                f"coefficients, or a matrix of 1-forms; received {type(data).__name__}"
+            )
+        self.value = value
+        self.algebra = algebra
+        self.forms = _unit_forms(self._entries())
+
+    def _entries(self):
+        if self.algebra is None:
+            return list(self.value)
+        return list(self.value.coeff_dict.values())
+
+    def _map(self, func):
+        return connection_form(self.value._dgcv_eds_applyfunc(func))
+
+    def _dgcv_eds_applyfunc(self, func):
+        return self.value._dgcv_eds_applyfunc(func)
+
+    def __dgcv_conjugate__(self, symbolic=False):
+        return self._eval_conjugate()
+
+    def __dgcv_apply__(self, func, **kwargs):
+        return self._map(lambda entry: func(entry, **kwargs))
+
+    def _eval_conjugate(self):
+        return self._map(_conjugate_entry)
+
+    def _eval_simplify(self, **kwargs):
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kwargs)
+        return connection_form(self.value._eval_simplify(**kwargs))
+
+    def simplify(self, **kwargs):
+        return self._eval_simplify(**kwargs)
+
+    def _eval_canonicalize(self, depth=1000):
+        return self._map(lambda entry: _canonicalize_entry(entry, depth))
+
+    def subs(self, subs_data, with_diff_corollaries=False, with_conjugates=None):
+        close = with_diff_corollaries if with_conjugates is None else with_conjugates
+        if close and isinstance(subs_data, dict):
+            subs_data = _conjugate_closure(subs_data, "subs")
+        return self._map(lambda entry: _subs_entry(entry, subs_data, with_diff_corollaries))
+
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
+
+    def curvature(self, with_simplify=False):
+        v = self.value
+        if self.algebra is None:
+            out = extDer(v) + v @ v
+        else:
+            out = extDer(v) + rational(1, 2) * (v * v)
+        return _routed_simplify(out) if with_simplify else out
+
+    def bianchi(self, curvature=None, with_simplify=False):
+        v = self.value
+        K = self.curvature() if curvature is None else curvature
+        if isinstance(K, connection_form):
+            K = K.value
+        if self.algebra is None:
+            out = extDer(K) + v @ K - K @ v
+        else:
+            out = extDer(K) + v * K
+        return _routed_simplify(out) if with_simplify else out
+
+    def coefficient(self, form):
+        if self.algebra is None:
+            return matrix_dgcv(
+                [[_form_coefficient(entry, form) for entry in row] for row in self.value.array]
+            )
+        return algebra_element_class(
+            self.algebra,
+            {idx: _form_coefficient(c, form) for idx, c in self.value.coeff_dict.items()},
+            self.value.valence,
+        )
+
+    def coefficients(self):
+        return {form: self.coefficient(form) for form in self.forms}
+
+    def model_algebra(self, label, **kwargs):
+        from ..algebras.creators.general import createAlgebra
+
+        kwargs.setdefault("return_created_object", True)
+        return createAlgebra([self.coefficient(form) for form in self.forms], label, **kwargs)
+
+    @property
+    def is_zero(self):
+        return self.value.is_zero
+
+    @property
+    def free_symbols(self):
+        return self.value.free_symbols
+
+    def __iter__(self):
+        return iter(self._entries())
+
+    def __eq__(self, other):
+        if not isinstance(other, connection_form):
+            return NotImplemented
+        return self.value == other.value
+
+    def __hash__(self):
+        return hash((connection_form, self.value))
+
+    def __str__(self):
+        return str(self.value)
+
+    def __repr__(self):
+        return f"connection_form({self.value!r})"
+
+    def _latex(self, printer=None, raw=True, **kwargs):
+        return self.value._latex(raw=True)
+
+    def _repr_latex_(self, raw=False, **kwargs):
+        tex = self._latex()
+        return tex if raw else f"${tex}$"
+
+
+register_legacy_sympy_class(connection_form)

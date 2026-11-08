@@ -19,12 +19,12 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import numbers
+from collections import Counter
 from fractions import Fraction
 from functools import total_ordering
 
 from ..core.base import dgcv_class
-from .._aux._deprecated.dgcv_formatter import process_basis_label
-from .._aux._utilities._config import dgcv_warning
+from .._aux._utilities._config import dgcv_warning, get_variable_registry
 from .._aux._vmf._safeguards import retrieve_passkey
 from .._aux.printing.printing._eds import conjugation_prefix, ordinal_latex
 from .._aux.printing.printing._string_processing import _process_var_label
@@ -48,8 +48,11 @@ from ._roles import (
     ASSUMPTION_NAMES,
     CONJUGATE_ROLE,
     FAMILY_ROLES,
+    NON_INHERITED_MARKERS,
+    REAL_IMPLYING_ASSUMPTIONS,
     ROLE_MARKERS,
     family_of_label,
+    parse_assumptions,
     role_of_label,
 )
 
@@ -148,6 +151,10 @@ def _custom_conj(expr):
 _EMPTY_COFRAME = None
 
 
+def _derivative_key(coframe_derivatives):
+    return tuple((elem[0].hash_key,) + tuple(elem[1:]) for elem in coframe_derivatives)
+
+
 def _empty_coframe():
     global _EMPTY_COFRAME
     if _EMPTY_COFRAME is None:
@@ -188,6 +195,134 @@ def _zero_obstruction(obj):
     return obj.__dgcv_solve_bridge__(bridge), bridge.symbols
 
 
+def _normal_order(cf, indices):
+    if cf._all_directions_commute():
+        return tuple(sorted(indices))
+    out = []
+    for a in indices:
+        start = len(out)
+        while start > 0 and cf._directions_commute(out[start - 1], a):
+            start -= 1
+        pos = start
+        while pos < len(out) and out[pos] <= a:
+            pos += 1
+        out.insert(pos, a)
+    return tuple(out)
+
+
+def _in_normal_order(atom):
+    for cd in atom.coframe_derivatives:
+        idx = cd[1:]
+        if len(idx) > 1 and not (
+            cd[0]._all_directions_commute() and list(idx) == sorted(idx)
+        ):
+            return False
+    return True
+
+
+def _derivative_remainder(cf, mine, theirs):
+    if cf._all_directions_commute():
+        left = Counter(theirs)
+        left.subtract(Counter(mine))
+        if any(v < 0 for v in left.values()):
+            return None
+        return tuple(sorted(left.elements()))
+    n = len(mine)
+    if theirs[:n] != mine:
+        return None
+    return theirs[n:]
+
+
+_ATOM_KINDS = ("zero_form", "zero_form_conjugate")
+_LABEL_ASSUMPTIONS = frozenset({"real", "constant"})
+
+
+def _family_of(label):
+    registry = get_variable_registry()
+    info = registry["paths"].get(label)
+    if info is None or info.get("kind") not in _ATOM_KINDS:
+        return None, None
+    system_label = info["path"][1]
+    return system_label, registry["eds"]["atoms"].get(system_label)
+
+
+def _family_entry(label):
+    return _family_of(label)[1]
+
+
+def _assumption_record(atom, create=False):
+    family = _family_entry(atom.label)
+    if family is None:
+        return None
+    record = family.get("assumptions")
+    if record is None and create:
+        record = family["assumptions"] = {}
+    return record
+
+
+def _independence_rules(independent_of, coframe_independants):
+    if independent_of is None:
+        return coframe_independants
+    rules = {cf: set(idx) for cf, idx in (coframe_independants or {}).items()}
+    if isinstance(independent_of, dict):
+        for cf, idx in independent_of.items():
+            rules.setdefault(cf, set()).update(idx)
+        return rules
+    forms = (
+        list(independent_of)
+        if isinstance(independent_of, (list, tuple, set, frozenset))
+        else [independent_of]
+    )
+    for form in forms:
+        if not isinstance(form, abstract_differential_form_atom):
+            raise TypeError(
+                "`independent_of` expects 1-forms of a coframe or a dictionary {coframe: indices}"
+            )
+        cf = form.primary_coframe
+        if cf is None:
+            continue
+        rules.setdefault(cf, set()).add(cf.forms.index(form))
+    return rules
+
+
+def _mapped_independence(rules, conjugate=False):
+    if not conjugate:
+        return {cf: set(idx) for cf, idx in rules.items()}
+    return {cf: {cf.conj_rules.get(i, i) for i in idx} for cf, idx in rules.items()}
+
+
+def _independent_of_form(rules, form):
+    return any(
+        form in other.forms and other.forms.index(form) in indices
+        for other, indices in rules.items()
+    )
+
+
+def _declare_real(system_label, family, pair):
+    primary, conj = pair
+    marks = family.setdefault("declared", {})
+    if "real" in marks.get(primary.label, ()) or "real" in primary._markers:
+        return
+    marks[primary.label] = marks.get(primary.label, frozenset()) | {"real"}
+    family["family_relatives"][primary.label] = (primary, primary)
+    if conj.label != primary.label:
+        registry = get_variable_registry()
+        family["family_relatives"].pop(conj.label, None)
+        family["conjugates"].pop(conj.label, None)
+        registry["paths"].pop(conj.label, None)
+        owner = registry["_labels"].get(system_label)
+        if owner is not None:
+            owner.get("children", set()).discard(conj.label)
+        family.setdefault("retired", []).append(conj.label)
+        dgcv_warning(
+            f"`{primary.label}` is now real: `{conj.label}` has left the variable management framework but "
+            "stays bound in the namespace and may occur in expressions built earlier; replace it with "
+            f"`subs({{{conj.label}: {primary.label}}})`"
+        )
+    if all("real" in marks.get(name, ()) for name in family.get("family_names", ())):
+        family["real"] = True
+
+
 class zero_form_atom(dgcv_class):
     _dgcv_class_check = retrieve_passkey()
     _dgcv_category = "zeroFormAtom"
@@ -199,7 +334,8 @@ class zero_form_atom(dgcv_class):
         coframe_derivatives=tuple(),
         coframe=None,
         _markers=frozenset(),
-        coframe_independants=dict(),
+        coframe_independants=None,
+        assumptions=None,
     ):
         """
         Create a new zeroFormAtom instance.
@@ -214,6 +350,12 @@ class zero_form_atom(dgcv_class):
                 f"label must be type `str`. Instead received `{type(label)}`\n given label: {label}"
             )
 
+        if coframe_independants is None:
+            coframe_independants = {}
+        if assumptions is not None:
+            _markers = frozenset(_markers) | {
+                name for name, value in parse_assumptions(assumptions).items() if value
+            }
         if not isinstance(coframe_derivatives, (tuple, list)):
             raise ValueError(
                 f"coframe_derivatives must be a tuple of tuples whose first entry is a coframe and whose subsequent entries are indices of coframe derivatives.\n given `coframe_derivatives` of type: {type(coframe_derivatives)}"
@@ -232,9 +374,13 @@ class zero_form_atom(dgcv_class):
                     f"tuples in `coframe_derivatives` must begin with an abstCoframe instance followed by non-negative integers in the range of the corresponding coframe dimension. Instead of an integer tuple, recieved: {elem[1:]} \n with associated coframe basis: {elem[0]}"
                 )
         coframe_derivatives = tuple(
-            [tuple(elem) for elem in coframe_derivatives if len(elem[1:]) > 0]
+            (elem[0],) + _normal_order(elem[0], tuple(elem[1:]))
+            for elem in coframe_derivatives
+            if len(elem) > 1
         )
-        if coframe is None:
+        if coframe_derivatives and not NON_INHERITED_MARKERS.isdisjoint(_markers):
+            _markers = frozenset(_markers) - NON_INHERITED_MARKERS
+        if coframe is None or (coframe_derivatives and coframe is _empty_coframe()):
             if len(coframe_derivatives) > 0:
                 coframe = coframe_derivatives[0][0]
             else:
@@ -249,14 +395,16 @@ class zero_form_atom(dgcv_class):
         # Using SymPy's Basic constructor
         self.label = label
         self.coframe_derivatives = coframe_derivatives
+        self._hash = hash((label, _derivative_key(coframe_derivatives)))
         self.coframe = coframe
 
         self._markers = _markers
-        self.coframe_independants = coframe_independants
-        self.is_constant = "constant" in _markers
-        self.is_one = self.label == "_1" and self.is_constant
-        self._is_zero = self.label == "_0" and self.is_constant
+        self._coframe_independants = coframe_independants
+        constant = "constant" in _markers
+        self.is_one = self.label == "_1" and constant
+        self._is_zero = self.label == "_0" and constant
         self._rf_cache = None
+        self._self_conj = None
         self.secondary_coframes = [
             elem[0] for elem in self.coframe_derivatives if elem[0] != self.coframe
         ]
@@ -324,6 +472,37 @@ class zero_form_atom(dgcv_class):
         return _nf_hooks["is_leaf"](other)
 
     @property
+    def primary_coframe(self):
+        if self.coframe is not _empty_coframe():
+            return self.coframe
+        family = _family_entry(self.label)
+        return None if family is None else family.get("primary_coframe")
+
+    @property
+    def coframe_independants(self):
+        family = _family_entry(self.label)
+        if family is None:
+            return self._coframe_independants
+        return family.get("independent_of", {}).get(self.label, {})
+
+    def _declared(self):
+        family = _family_entry(self.label)
+        if family is None:
+            return frozenset()
+        return family.get("declared", {}).get(self.label, frozenset())
+
+    def _declared_real(self):
+        return "real" in self._markers or "real" in self._declared()
+
+    @property
+    def is_constant(self):
+        return "constant" in self._markers or "constant" in self._declared()
+
+    @property
+    def is_parameter(self):
+        return self.is_constant
+
+    @property
     def differential_order(self):
         if not hasattr(self, "_differential_order"):
             self._differential_order = sum(
@@ -342,12 +521,143 @@ class zero_form_atom(dgcv_class):
     def family(self):
         return family_of_label(self.label, zero_form_atom)
 
+    def _has_indices(self):
+        return any(len(elem) > 1 for elem in self.coframe_derivatives)
+
+    def _real_valued(self):
+        if not (self.role in ("real", "imaginary") or self._declared_real()):
+            return False
+        if not self._has_indices():
+            return True
+        fixed = self._self_conj
+        if fixed is None:
+            fixed = self._self_conj = self._eval_conjugate() == self
+        return fixed
+
     @property
     def assumptions(self):
-        out = {m for m in self._markers if m in ASSUMPTION_NAMES}
-        if self.role in ("real", "imaginary"):
+        out = {m for m in self._markers if m in ASSUMPTION_NAMES and m != "real"}
+        record = _assumption_record(self)
+        if record:
+            out |= record.get(self, frozenset())
+        if self._real_valued():
             out.add("real")
         return frozenset(out)
+
+    @property
+    def source_zero_form(self):
+        if not self._has_indices():
+            return self
+        return zero_form_atom(
+            self.label,
+            coframe=self.coframe,
+            _markers=self._markers,
+            coframe_independants=self._coframe_independants,
+        )
+
+    def assume(self, *assumptions, **flags):
+        independent_of = flags.pop("independent_of", None)
+        differential = flags.pop("differential", None)
+        declared = {}
+        for item in assumptions:
+            if isinstance(item, dict):
+                declared.update(item)
+            elif isinstance(item, str):
+                declared[item] = True
+            else:
+                declared.update(dict.fromkeys(item, True))
+        declared.update(flags)
+        for name, value in declared.items():
+            if name not in ASSUMPTION_NAMES or not isinstance(value, bool):
+                raise ValueError(
+                    f"unknown assumption {name!r}; the accepted names are "
+                    f"{', '.join(sorted(ASSUMPTION_NAMES))}, each mapped to True or False"
+                )
+            if name in _LABEL_ASSUMPTIONS and value is False:
+                raise ValueError(f"`{name}` cannot be withdrawn once declared")
+        label_level = {name for name in _LABEL_ASSUMPTIONS if declared.pop(name, False)}
+        system_label, family = _family_of(self.label)
+        if family is None:
+            raise ValueError(
+                f"`{self.label}` is not registered in the variable management framework; "
+                "create it with `createZeroForm` before declaring assumptions"
+            )
+        if (label_level or independent_of is not None or differential is not None) and self._has_indices():
+            names = sorted(label_level) + [
+                name
+                for name, value in (("independent_of", independent_of), ("differential", differential))
+                if value is not None
+            ]
+            raise ValueError(
+                f"declare {', '.join(f'`{n}`' for n in names)} on the zero form `{self.label}` itself, not on a derivative"
+            )
+        writes = self._check_records(differential, label_level, declared, independent_of)
+        if writes:
+            owner = differential.primary_coframe
+            owner._write_potentials(writes)
+            if self.primary_coframe is None:
+                family["primary_coframe"] = owner
+        if declared:
+            record = family.setdefault("assumptions", {})
+            current = set(record.get(self, ()))
+            for name, value in declared.items():
+                if value:
+                    current.add(name)
+                else:
+                    current.discard(name)
+            if current:
+                record[self] = frozenset(current)
+            else:
+                record.pop(self, None)
+        if label_level or independent_of is not None:
+            pair = family["family_relatives"].get(self.label, (self, self))
+            labels = {atom.label for atom in pair}
+            if "constant" in label_level:
+                marks = family.setdefault("declared", {})
+                for name in labels:
+                    marks[name] = marks.get(name, frozenset()) | {"constant"}
+            if independent_of is not None:
+                rules = family.setdefault("independent_of", {})
+                new = _independence_rules(independent_of, rules.get(self.label))
+                for name in labels:
+                    rules[name] = _mapped_independence(new, name != self.label)
+            if "real" in label_level:
+                _declare_real(system_label, family, pair)
+        changed = _nf_hooks.get("assumptions_changed")
+        if changed is not None:
+            changed(self)
+        return self
+
+    def _check_records(self, differential, label_level, declared, independent_of):
+        real = "real" in label_level or any(declared.get(name) for name in REAL_IMPLYING_ASSUMPTIONS)
+        constant = "constant" in label_level
+        rules = {} if independent_of is None else _independence_rules(independent_of, None)
+        home = self.primary_coframe
+        if differential is None:
+            row = None if home is None else home._potential_index.get(self)
+            for index in row or ():
+                home._check_differential(
+                    home.forms[index],
+                    self.label,
+                    real=real,
+                    constant=constant,
+                    independent=_independent_of_form(rules, home.forms[index]),
+                )
+            return None
+        owner = getattr(differential, "primary_coframe", None)
+        if owner is None:
+            raise ValueError("`differential` must be a basis 1-form of a registered coframe")
+        if home is not None and home is not owner:
+            raise ValueError(f"{differential} belongs to another coframe than {self.label}")
+        owner._check_differential(
+            differential,
+            self.label,
+            real=real or self._declared_real() or self.role == "real",
+            constant=constant or self.is_constant,
+            independent=_independent_of_form(rules, differential)
+            or _independent_of_form(self.coframe_independants, differential),
+        )
+        return owner._potential_writes(differential, self)
 
     @property
     def is_real(self):
@@ -389,7 +699,7 @@ class zero_form_atom(dgcv_class):
             coframe_derivatives=self.coframe_derivatives,
             coframe=self.coframe,
             _markers=self._markers if markers is None else markers,
-            coframe_independants=self.coframe_independants,
+            coframe_independants=self._coframe_independants,
         )
 
     def partner(self, role):
@@ -440,7 +750,7 @@ class zero_form_atom(dgcv_class):
         if role in ("holomorphic", "antiholomorphic"):
             x = self.partner("real")
             return x if x is not None else _generic_re(self)
-        if role in ("real", "imaginary") or "real" in self._markers:
+        if self._real_valued():
             return self
         return _generic_re(self)
 
@@ -451,7 +761,7 @@ class zero_form_atom(dgcv_class):
             if y is None:
                 return _generic_im(self)
             return y if role == "holomorphic" else zero_form_class(("mul", -1, y))
-        if role in ("real", "imaginary") or "real" in self._markers:
+        if self._real_valued():
             return 0
         return _generic_im(self)
 
@@ -473,7 +783,21 @@ class zero_form_atom(dgcv_class):
         """
         Hash the zeroFormAtom instance based on its label and coframe_derivatives.
         """
-        return hash((self.label, self.coframe_derivatives))
+        return self._hash
+
+    def __reduce__(self):
+        state = {key: value for key, value in self.__dict__.items() if key != "_hash"}
+        return (
+            zero_form_atom._from_pickle,
+            (self.label, _derivative_key(self.coframe_derivatives)),
+            state,
+        )
+
+    @classmethod
+    def _from_pickle(cls, label, key):
+        obj = object.__new__(cls)
+        obj._hash = hash((label, key))
+        return obj
 
     def __lt__(self, other):
         if not isinstance(other, zero_form_atom):
@@ -511,7 +835,7 @@ class zero_form_atom(dgcv_class):
         if partner is not None:
             conjugated_label = partner.label
             conjugated_markers = partner._markers
-        elif role in ("real", "imaginary") or "real" in self._markers:
+        elif role in ("real", "imaginary") or self._declared_real():
             conjugated_label = self.label
         elif self.label.startswith(pref):
             conjugated_label = self.label[prefL:]  # Remove conjugate prefix
@@ -530,10 +854,14 @@ class zero_form_atom(dgcv_class):
             coframe_derivatives=newCD,
             coframe=self.coframe,
             _markers=conjugated_markers,
-            coframe_independants=self.coframe_independants,
+            coframe_independants=self._coframe_independants,
         )
 
     def _eval_simplify(self, **kws):
+        constraints = kws.pop("constraints", None)
+        with_conjugates = kws.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kws)
         return self
 
     def __mul__(self, other):
@@ -688,6 +1016,8 @@ class zero_form_atom(dgcv_class):
         return self, True  # True for stabilized status
 
     def _eval_canonicalize(self, depth=1000):
+        if _in_normal_order(self):
+            return self
         zf = self
         stabilized = False
         count = 0
@@ -705,41 +1035,26 @@ class zero_form_atom(dgcv_class):
         "compute if other element is a coframe derivative (of some order) of self"
         if isinstance(other, zero_form_class) and isinstance(other.base, zero_form_atom):
             other = other.base
-        if isinstance(other, zero_form_atom):
-            if self.label == other.label:
-                trip = False
-                CDlen = len(self.coframe_derivatives)
-                if CDlen <= len(other.coframe_derivatives):
-                    if CDlen == 0:
-                        if returnCD:
-                            return True, other.coframe_derivatives
-                        return True
-                    selfTail = self.coframe_derivatives[-1]
-                    tailCDlen = len(selfTail)
-                    compareCD = list(other.coframe_derivatives[: CDlen - 1])
-                    otherCompareTail = other.coframe_derivatives[CDlen - 1][:tailCDlen]
-                    if (
-                        self.coframe_derivatives[:-1] == compareCD
-                        and selfTail == otherCompareTail
-                    ):
+        trip = False
+        trailingCD = tuple()
+        if isinstance(other, zero_form_atom) and self.label == other.label:
+            own = self.coframe_derivatives
+            theirs = other.coframe_derivatives
+            n = len(own)
+            if n == 0:
+                trip, trailingCD = True, theirs
+            elif n <= len(theirs) and own[:-1] == theirs[: n - 1]:
+                tail, their_tail = own[-1], theirs[n - 1]
+                if tail[0] == their_tail[0]:
+                    rest = _derivative_remainder(tail[0], tail[1:], their_tail[1:])
+                    if rest is not None:
                         trip = True
-                        trailingCD = [
-                            [other.coframe_derivatives[CDlen - 1][0]]
-                            + list(other.coframe_derivatives[CDlen - 1][tailCDlen:])
-                        ]
-                        trailingCD = tuple(
-                            trailingCD + list(other.coframe_derivatives[CDlen:])
-                        )
-                    else:
-                        trailingCD = tuple()
-                    if returnCD:
-                        return trip, trailingCD
-                    else:
-                        return trip, trailingCD
+                        trailingCD = theirs[n:]
+                        if rest:
+                            trailingCD = ((tail[0],) + tuple(rest),) + trailingCD
         if returnCD:
-            return False, tuple()
-        else:
-            return False
+            return trip, trailingCD
+        return trip
 
     def is_diff_corollary(self, other, returnCD=False):
         if isinstance(other, zero_form_class) and isinstance(other.base, zero_form_atom):
@@ -754,11 +1069,13 @@ class zero_form_atom(dgcv_class):
     def as_ordered_factors(self):
         return (self,)
 
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
         # an alias for regular subs so that other functions can know the with_diff_corollaries keyword is available
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, data, with_diff_corollaries=False):
+    def subs(self, data, with_diff_corollaries=False, with_conjugates=None):
         """
         Symbolic substitution in zeroFormAtom.
         """
@@ -773,6 +1090,9 @@ class zero_form_atom(dgcv_class):
                 )
 
         if isinstance(data, dict):
+            close = with_diff_corollaries if with_conjugates is None else with_conjugates
+            if close:
+                data = _conjugate_closure(data, "subs")
             if with_diff_corollaries:
                 for key in data.keys():
                     truthVal, coefDer = self.is_diff_corollary(key, returnCD=True)
@@ -814,7 +1134,7 @@ class zero_form_atom(dgcv_class):
         return result
 
     def simplify(self, **kw):
-        return self
+        return self._eval_simplify(**kw)
 
     def factor(self, **kw):
         return self
@@ -887,7 +1207,7 @@ class zero_form_atom(dgcv_class):
             for elem in self.coframe_derivatives[1:]:
                 v = elem[1:]
                 count_str = "" if count == 0 else f"_{count}"
-                partials_str = "_".join(map(str, v))
+                partials_str = "_".join(map(str, [j + 1 for j in v]))
                 return_str = f"D_{partials_str}({return_str}){count_str}"
                 count += 1
             return return_str
@@ -931,7 +1251,7 @@ class zero_form_atom(dgcv_class):
             index_part = ""
 
         # Process the base part
-        formatted_label = process_basis_label(first_part)
+        formatted_label = _process_var_label(first_part)
 
         if len(self.coframe_derivatives) > 0 and (
             len(self.coframe_derivatives[0]) > 1 or len(self.coframe_derivatives) > 1

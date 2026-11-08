@@ -13,8 +13,10 @@ from ._functions import (
     _CIRCULAR,
     _HYPERBOLIC,
     ElementaryFunction,
+    Power,
     Radical,
     elementary,
+    power,
     radical,
 )
 from ._normal_form import (
@@ -50,6 +52,12 @@ def _transform(rf, rule):
             old = leaf._arg_rf()
             arg = _transform(old, rule)
             out = radical(arg, leaf.q) if arg is not old else None
+            if out is not None and leaf.conjugated:
+                out = conj_rf(out)
+        elif isinstance(leaf, Power):
+            old_b, old_e = leaf._arg_rf(), leaf._exp_rf()
+            b, e = _transform(old_b, rule), _transform(old_e, rule)
+            out = power(b, e) if b is not old_b or e is not old_e else None
             if out is not None and leaf.conjugated:
                 out = conj_rf(out)
         else:
@@ -112,7 +120,10 @@ def _angle_terms(arg):
 def _collect_bases(rf, table):
     for g in rf.gens():
         leaf = _poly.gen_leaf(g)
-        if isinstance(leaf, (ElementaryFunction, Radical)):
+        if isinstance(leaf, Power):
+            _collect_bases(leaf._arg_rf(), table)
+            _collect_bases(leaf._exp_rf(), table)
+        elif isinstance(leaf, (ElementaryFunction, Radical)):
             arg = leaf._arg_rf()
             _collect_bases(arg, table)
             if isinstance(leaf, ElementaryFunction) and (
@@ -248,6 +259,15 @@ def _reflected(rf):
     mapping = {}
     for g in rf.gens():
         leaf = _poly.gen_leaf(g)
+        if isinstance(leaf, Power):
+            old_b, old_e = leaf._arg_rf(), leaf._exp_rf()
+            b, e = _reflected(old_b), _reflected(old_e)
+            if leaf.conjugated:
+                b, e = _reflected(conj_rf(b)), _reflected(conj_rf(e))
+            elif b is old_b and e is old_e:
+                continue
+            mapping[g] = power(b, e)
+            continue
         if not isinstance(leaf, (ElementaryFunction, Radical)):
             continue
         old = leaf._arg_rf()

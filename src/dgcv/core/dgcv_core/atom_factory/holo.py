@@ -3,7 +3,7 @@ from __future__ import annotations
 from numbers import Integral, Number
 from typing import Literal
 
-from ...._aux._backends._symbolic_router import conjugate
+from ...._aux._backends._symbolic_router import _engine_conjugate
 from ...._aux._backends._types_and_constants import half, imag_unit
 from ...._aux._utilities._config import (
     get_dgcv_settings_registry,
@@ -244,12 +244,12 @@ def complexVarProc(
                 realToSym_updates[imag_var] = (
                     -imag_unit() * half() * (comp_var - bar_comp_var)
                 )
-                symToHol_updates[bar_comp_var] = conjugate(comp_var)
+                symToHol_updates[bar_comp_var] = _engine_conjugate(comp_var)
                 symToReal_updates[comp_var] = real_var + imag_unit() * imag_var
                 symToReal_updates[bar_comp_var] = real_var - imag_unit() * imag_var
-                realToHol_updates[real_var] = half() * (comp_var + conjugate(comp_var))
+                realToHol_updates[real_var] = half() * (comp_var + _engine_conjugate(comp_var))
                 realToHol_updates[imag_var] = (
-                    imag_unit() * half() * (conjugate(comp_var) - comp_var)
+                    imag_unit() * half() * (_engine_conjugate(comp_var) - comp_var)
                 )
                 real_part_updates[comp_var] = real_var
                 real_part_updates[bar_comp_var] = real_var
@@ -320,12 +320,12 @@ def complexVarProc(
             holToReal_updates[var_hol] = var_real + imag_unit() * var_im
             realToSym_updates[var_real] = half() * (var_hol + var_bar)
             realToSym_updates[var_im] = -imag_unit() * half() * (var_hol - var_bar)
-            symToHol_updates[var_bar] = conjugate(var_hol)
+            symToHol_updates[var_bar] = _engine_conjugate(var_hol)
             symToReal_updates[var_hol] = var_real + imag_unit() * var_im
             symToReal_updates[var_bar] = var_real - imag_unit() * var_im
-            realToHol_updates[var_real] = half() * (var_hol + conjugate(var_hol))
+            realToHol_updates[var_real] = half() * (var_hol + _engine_conjugate(var_hol))
             realToHol_updates[var_im] = (
-                imag_unit() * half() * (conjugate(var_hol) - var_hol)
+                imag_unit() * half() * (_engine_conjugate(var_hol) - var_hol)
             )
             real_part_updates[var_hol] = var_real
             real_part_updates[var_bar] = var_real
@@ -744,12 +744,12 @@ def complexVarProc(
                 realToSym_updates[imag_var] = (
                     -imag_unit() * half() * (comp_var - bar_comp_var)
                 )
-                symToHol_updates[bar_comp_var] = conjugate(comp_var)
+                symToHol_updates[bar_comp_var] = _engine_conjugate(comp_var)
                 symToReal_updates[comp_var] = real_var + imag_unit() * imag_var
                 symToReal_updates[bar_comp_var] = real_var - imag_unit() * imag_var
-                realToHol_updates[real_var] = half() * (comp_var + conjugate(comp_var))
+                realToHol_updates[real_var] = half() * (comp_var + _engine_conjugate(comp_var))
                 realToHol_updates[imag_var] = (
-                    imag_unit() * half() * (conjugate(comp_var) - comp_var)
+                    imag_unit() * half() * (_engine_conjugate(comp_var) - comp_var)
                 )
                 real_part_updates[comp_var] = real_var
                 real_part_updates[bar_comp_var] = real_var
@@ -803,7 +803,7 @@ def complexVarProc(
             realToSym_updates_batch[imag] = -imag_unit() * half() * (comp - anti)
 
         symToHol_updates_batch = {
-            anti: conjugate(comp) for comp, anti, _, _ in totalVarListLoc
+            anti: _engine_conjugate(comp) for comp, anti, _, _ in totalVarListLoc
         }
 
         symToReal_updates_batch = {}
@@ -813,10 +813,10 @@ def complexVarProc(
 
         realToHol_updates_batch = {}
         for comp, _, real, _ in totalVarListLoc:
-            realToHol_updates_batch[real] = half() * (comp + conjugate(comp))
+            realToHol_updates_batch[real] = half() * (comp + _engine_conjugate(comp))
         for comp, _, _, imag in totalVarListLoc:
             realToHol_updates_batch[imag] = (
-                imag_unit() * half() * (conjugate(comp) - comp)
+                imag_unit() * half() * (_engine_conjugate(comp) - comp)
             )
 
         real_part_updates_batch = {}

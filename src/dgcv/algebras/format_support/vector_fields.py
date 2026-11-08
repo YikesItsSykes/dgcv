@@ -4,7 +4,7 @@ from ..._aux._backends._symbolic_router import (
     get_free_symbols,
     simplify,
 )
-from ..._aux._backends._types_and_constants import symbol
+from ..._aux._backends._types_and_constants import _disposable_symbols, symbol
 from ..._aux._vmf._safeguards import create_key
 from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
 from ...core.dgcv_core import VF_bracket
@@ -33,7 +33,7 @@ def aDataFromVFWithAnsatz(
     free_symbols = {v for v in free_symbols if v in coordinates}
     vlabel = create_key("var")
     var_dict = {
-        k: [symbol(f"{vlabel}{k}_{idx}") for idx in range(len(v))]
+        k: _disposable_symbols(f"{vlabel}{k}_", len(v))
         for k, v in graded_components.items()
     }
     gen_elements = {

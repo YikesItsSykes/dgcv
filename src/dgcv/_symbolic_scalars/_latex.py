@@ -8,10 +8,11 @@ from fractions import Fraction
 from .._aux.printing.printing._string_processing import latex_superscript
 from ..eds._atoms import zero_form_atom
 from . import _poly
-from ._normal_form import OpaqueLeaf, _leaf_keys, _term_key
+from ._normal_form import RF, OpaqueLeaf, _leaf_keys, _term_key
 
 _merge_monomial = None
 _split_exp_denominator = None
+_fold_powers = None
 
 
 class _Unprintable(Exception):
@@ -38,6 +39,7 @@ class _NFPrinter:
         self.tex = {g: leaf._latex() for g, leaf in self.leaves.items()}
         self.order = sorted(self.keys, key=self.keys.get)
         self.extra = None
+        self.pfold = None
         self.index = {g: i for i, g in enumerate(self.order)}
 
     def monomial(self, exps):
@@ -85,7 +87,7 @@ class _NFPrinter:
 
         shown = self.monomial(exps)
         if _merge_monomial is not None:
-            shown = _merge_monomial(shown, self.extra) or shown
+            shown = _merge_monomial(shown, self.extra, self.pfold) or shown
         present = {g: e for g, e in shown if type(g) is int}
         merged = {}
         for g, e in present.items():
@@ -174,6 +176,12 @@ def nf_latex(rf):
     if _poly.p_has_float(num) or _poly.p_has_float(den):
         raise _Unprintable
     printer = _NFPrinter(_poly.p_gens(num) | _poly.p_gens(den))
+    if _fold_powers is not None:
+        fold = _fold_powers(rf)
+        if fold is not None:
+            num, den, pextra, shifts = fold
+            printer.pfold = (pextra, shifts)
+            rf = RF(num, den, canonical=True)
     if _split_exp_denominator is not None:
         den, printer.extra = _split_exp_denominator(rf)
     if _poly.p_is_const(den):
@@ -186,7 +194,9 @@ def nf_latex(rf):
     if (re_ or im) < 0:
         num, den = _poly.p_neg(num), _poly.p_neg(den)
 
+    pfold, printer.pfold = printer.pfold, None
     den_tex = printer.poly_tex(den)
+    printer.pfold = pfold
     terms = printer.grouped_terms(num)
     if len(terms) == 1:
         exps, re_, im = terms[0]

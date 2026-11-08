@@ -3,9 +3,14 @@ from __future__ import annotations
 from numbers import Integral
 from typing import List, Literal
 
-from ...._aux._utilities._config import dgcv_warning
-from ...._aux._vmf._safeguards import retrieve_passkey, retrieve_public_key
-from .atoms import variableProcedure
+from ...._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
+from ...._aux._vmf._safeguards import (
+    retrieve_passkey,
+    retrieve_public_key,
+    validate_creator_labels,
+)
+from ...combinatorics.combinatorics import carProd
+from .atoms import indexing_places, variableProcedure
 from .holo import complexVarProc
 from .systems import varWithVF
 
@@ -273,6 +278,42 @@ def createVariables(
         real_label = reformat_string(real_label)
     if isinstance(imaginary_label, str):
         imaginary_label = reformat_string(imaginary_label)
+
+    def _planned_member_labels(house):
+        if multiindex_shape is not None:
+            places = [indexing_places.get(place, "_") for place in index_placement or []]
+            places += ["_"] * (len(multiindex_shape) - len(places))
+            return [
+                f"{house}{''.join(a + str(b) for a, b in zip(places, idx))}"
+                for idx in carProd(
+                    *[range(initialIndex, initialIndex + n) for n in multiindex_shape]
+                )
+            ]
+        if number_of_variables is not None:
+            place = indexing_places.get(index_placement[0], "_") if index_placement else ""
+            return [
+                f"{house}{place}{i}"
+                for i in range(initialIndex, number_of_variables + initialIndex)
+            ]
+        return [house]
+
+    houses = []
+    members = []
+    pref = get_dgcv_settings_registry().get("conjugation_prefix", "BAR")
+    for j, house in enumerate(variable_label):
+        others = (
+            [f"{pref}{house}", real_label[j], imaginary_label[j]]
+            if complex and j < len(real_label) and j < len(imaginary_label)
+            else []
+        )
+        houses += others
+        for name in [house] + others:
+            members += _planned_member_labels(name)
+    validate_creator_labels(
+        ("standard_variable_systems", "complex_variable_systems"),
+        variable_label,
+        houses + members,
+    )
 
     if complex:
         rv = complexVarProc(

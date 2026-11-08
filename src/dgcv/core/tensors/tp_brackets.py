@@ -1,5 +1,6 @@
 from ..._aux._vmf._safeguards import get_dgcv_category
 from ..combinatorics.combinatorics import shufflings
+from ._protocol import _is_vs_element, _vs_bracket
 
 
 class _tp_brackets:
@@ -10,7 +11,7 @@ class _tp_brackets:
             return 0 * self
         if (
             get_dgcv_category(other) == "subalgebra_element"
-            and other.algebra != self.vector_space
+            and other.vectorSpace != self.vector_space
         ):
             other = other.ambient_rep
         if isinstance(other, tensorProduct):
@@ -118,8 +119,8 @@ class _tp_brackets:
                         new_dict[new_key] = new_dict.get(new_key, 0) + new_value
             return tensorProduct(new_dict)
 
-        elif hasattr(other, "algebra") and self.vector_space == other.algebra:
-            if self.vector_space != other.algebra:
+        elif _is_vs_element(other) and self.vector_space == other.vectorSpace:
+            if self.vector_space != other.vectorSpace:
                 raise ValueError(
                     "In `tensorProduct._bracket` both tensors must be defined w.r.t. the same single vector_space."
                 )
@@ -190,7 +191,7 @@ class _tp_brackets:
                                 algB[key1[0][0]],
                                 algB[key2[0][0]],
                             )
-                        newElem = elem1 * elem2
+                        newElem = _vs_bracket(elem1, elem2)
                         for k, v in newElem._convert_to_tp().coeff_dict.items():
                             new_dict[k] = new_dict.get(k, 0) + v
                     else:
@@ -235,7 +236,7 @@ class _tp_brackets:
                                 new_dict[key] = new_dict.get(key, 0) + new_value
             return tensorProduct(new_dict)
 
-        elif hasattr(other, "algebra"):
+        elif _is_vs_element(other):
             other_as_tensor = other._convert_to_tp()
             new_dict = {}
             for other_index, other_value in other_as_tensor.coeff_dict.items():

@@ -472,6 +472,7 @@ def to_sympy(base):
 
 _atoms_mod._nf_hooks.update(
     rf_gen=rf_gen,
+    assumptions_changed=lambda atom: _poly.invalidate_kinds(),
     nf_from_base=nf_from_base,
     base_from_nf=base_from_nf,
     base_from_factored=base_from_factored,

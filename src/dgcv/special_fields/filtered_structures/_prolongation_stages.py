@@ -9,7 +9,7 @@ from ..._aux._backends._symbolic_router import (
     get_free_symbols,
     subs,
 )
-from ..._aux._backends._types_and_constants import symbol
+from ..._aux._backends._types_and_constants import _disposable_symbols
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import create_key, get_dgcv_category
 from ...core.solvers import solve_dgcv
@@ -95,7 +95,7 @@ class _symbol_prolongation_stages:
                 ambient_basis = expansions
                 ambient_alias = new_level
                 varLabel = create_key(prefix="_cv")
-                tVars = [symbol(f"{varLabel}{j}") for j in range(len(ambient_basis))]
+                tVars = _disposable_symbols(varLabel, len(ambient_basis))
                 solVars = list(tVars)
                 general_elem = _fast_tensor_products._dgcv_multiadd_scaled(
                     [(tVars[j], ambient_basis[j]) for j in range(len(tVars))]
@@ -104,9 +104,7 @@ class _symbol_prolongation_stages:
                 general_elem_tp = general_elem._convert_to_tp()
                 for idx, dzElem in enumerate(z_level_tp):
                     varLabel2 = varLabel + f"{idx}_"
-                    vars2 = [
-                        symbol(f"{varLabel2}{j}") for j in range(len(ambient_basis))
-                    ]
+                    vars2 = _disposable_symbols(varLabel2, len(ambient_basis))
                     solVars += vars2
                     general_elem2 = _fast_tensor_products._dgcv_multiadd_scaled(
                         [(vars2[j], ambient_basis[j]) for j in range(len(tVars))]

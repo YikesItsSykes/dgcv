@@ -1,5 +1,5 @@
 from ..._aux._backends._symbolic_router import get_free_symbols, subs
-from ..._aux._backends._types_and_constants import symbol
+from ..._aux._backends._types_and_constants import _disposable_symbols
 from ..._aux._vmf._safeguards import create_key
 from ._driver import solve_dgcv
 
@@ -8,7 +8,7 @@ def linear_filter(spanners, linear_constraint, light_simplify=True):
     try:
         dim = len(spanners)
         pref = create_key("var")
-        variables = [symbol(f"{pref}_{idx}") for idx in range(dim)]
+        variables = _disposable_symbols(f"{pref}_", dim)
         combination = sum(
             [var * elem for var, elem in zip(variables[1:], spanners[1:])],
             variables[0] * spanners[0],

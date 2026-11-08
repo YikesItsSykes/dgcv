@@ -1,14 +1,12 @@
 from ..._aux._backends._symbolic_router import _scalar_is_zero
 from ..._aux._vmf._safeguards import get_dgcv_category
 from ..dgcv_core.spaces.spaces import _vs_card, card_root
+from ._protocol import _is_scalar, _is_vs_element
 
 
 class _tp_evaluation:
     def dual_pairing(self, other):
-        if get_dgcv_category(other) in {
-            "algebra_element",
-            "subalgebra_element",
-        }:
+        if _is_vs_element(other):
             other = other._convert_to_tp()
         if get_dgcv_category(other) != "tensorProduct":
             raise TypeError(f"cannot apply dual_pairing to type {type(other)}")
@@ -43,11 +41,16 @@ class _tp_evaluation:
                 for term in self.terms
             )
         if len(args) > 1:
-            return self.__call__(
+            partial = self.__call__(
                 args[0],
                 contract_from_left=contract_from_left,
                 demote_to_VS_when_possible=demote_to_VS_when_possible,
-            ).__call__(
+            )
+            if _is_scalar(partial):
+                if _scalar_is_zero(partial):
+                    return 0
+                raise TypeError("tensorProduct.__call__() received more arguments than the tensor has slots")
+            return partial.__call__(
                 *args[1:],
                 contract_from_left=contract_from_left,
                 demote_to_VS_when_possible=demote_to_VS_when_possible,

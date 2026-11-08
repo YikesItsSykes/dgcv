@@ -18,7 +18,7 @@ from . import _poly
 _ONE = {(): 1}
 _HOOKS = {}
 LeafKey = namedtuple("LeafKey", "conjugated kind rank name order args")
-NUMBER_RADICAL, CONSTANT, ATOM, FUNCTION, ELEMENTARY, RADICAL, OPAQUE = range(7)
+NUMBER_RADICAL, CONSTANT, ATOM, FUNCTION, ELEMENTARY, RADICAL, POWER, OPAQUE = range(8)
 _DIGIT_RUNS = re.compile(r"(\d+)")
 
 
@@ -1102,6 +1102,8 @@ def nf_from_base(base):
 
             if isinstance(b, _BuiltinLeaf) and b == E:
                 return _HOOKS["exp"](e_rf)
+            if not e_rf.is_constant:
+                return _HOOKS["power"](nf_from_base(b), e_rf)
 
             return rf_opaque(("pow", canonical_base(b), canonical_base(e)))
 

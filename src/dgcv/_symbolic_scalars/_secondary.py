@@ -23,7 +23,7 @@ from ..eds._constants import PI, E, NamedConstant
 from ..eds._zero_forms import _nf_of, zero_form_class
 from . import _poly
 from ._foreign import from_sage_rf, from_sympy_rf
-from ._functions import ElementaryFunction, FunctionAtom, Radical
+from ._functions import ElementaryFunction, FunctionAtom, Power, Radical
 from ._normal_form import _not_finite, nf_from_base
 
 
@@ -182,17 +182,15 @@ class SecondaryBridge:
             pass
 
     def _assumptions(self, atom):
-        markers = atom._markers
+        declared = atom.assumptions
         out = {}
-        if atom.role in ("real", "imaginary") or "real" in markers:
-            out["real"] = True
-        for key in ("positive", "negative", "nonnegative", "nonpositive", "integer"):
-            if key in markers:
+        for key in ("real", "positive", "negative", "nonnegative", "nonpositive", "integer"):
+            if key in declared:
                 out[key] = True
         return out
 
     def _signature(self, atom, base=None):
-        return (atom._markers, atom.role, None if base is None else id(base))
+        return (atom.assumptions, atom.role, None if base is None else id(base))
 
     def _evict(self, atom):
         entry = self.standins.pop(atom, None)
@@ -310,6 +308,9 @@ class SecondaryBridge:
                 out = self.mod.Pow(arg, self.mod.Rational(1, leaf.q))
             else:
                 out = arg ** (self.mod.QQ(1) / leaf.q)
+            return self.mod.conjugate(out) if leaf.conjugated else out
+        if isinstance(leaf, Power):
+            out = lower(leaf.args[0]) ** lower(leaf.args[1])
             return self.mod.conjugate(out) if leaf.conjugated else out
 
         if isinstance(leaf, FunctionAtom):

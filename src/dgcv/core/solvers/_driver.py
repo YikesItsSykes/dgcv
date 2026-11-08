@@ -2,10 +2,11 @@ from ..._aux._backends._engine import engine_capability, engine_kind, engine_mod
 from ..._aux._backends._polynomials import expr_union_primitives
 from ..._aux._backends._symbolic_router import get_free_symbols, simplify
 from ..._aux._backends._types_and_constants import expr_numeric_types
-from ..._aux._utilities._config import get_dgcv_settings_registry
+from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._vmf.vmf import order_coordinates
 from ._linsolve import _dgcv_linsolve, _sage_engine_linsolve
 from ._normalization import _equations_preprocessing, normalize_equations_and_vars
+from ._predicates import _as_zero_expr, _is_zero_after_simplify
 from ._solution_shapes import (
     _engine_solve_to_dicts,
     _linsolve_to_dicts,
@@ -14,6 +15,38 @@ from ._solution_shapes import (
 
 _LINEAR_METHODS = ("linear", "linear_parametric")
 _METHOD_ALIASES = {"linsolve": "linear"}
+
+
+def _uncovered_equations(eqns, vars_):
+    if not vars_:
+        return []
+    wanted = {str(v) for v in vars_}
+    out = []
+    for eq in eqns:
+        expr = _as_zero_expr(eq)
+        try:
+            names = {str(s) for s in get_free_symbols(expr)}
+        except Exception:
+            continue
+        if names & wanted:
+            continue
+        try:
+            if _is_zero_after_simplify(expr):
+                continue
+        except Exception:
+            pass
+        out.append(expr)
+    return out
+
+
+def _warn_uncovered(uncovered, total, bridge):
+    first = bridge.lift_expr(uncovered[0])
+    dgcv_warning(
+        f"solve_dgcv: {len(uncovered)} of {total} equations contain none of the unknowns, "
+        f"so the system has no solution as posed; the first is {first} = 0. "
+        "Add the unknowns it involves or leave it out.",
+        stacklevel=3,
+    )
 
 
 def solve_dgcv(
@@ -30,6 +63,7 @@ def solve_dgcv(
     simplify_pivots=False,
     surface_singularities=False,
     preprocess_only=False,
+    curate_format=None,
 ):
     """
     Solve an equation system for the given variables.
@@ -72,6 +106,13 @@ def solve_dgcv(
         Return the preprocessed system ``(equations, variables)`` in the active
         engine's scalars, exactly as it would be handed to a solver, instead of
         solving it.
+    curate_format : bool, optional
+        Standardize what comes back from a symbolic engine: when an equation
+        contains none of the unknowns and is not identically zero, the system
+        has no solution as posed and ``[]`` is returned, which is the
+        convention of dgcv's builtin engine. Defaults to the versioned
+        setting ``_curate_solve_format`` (True from 0.3.3). ``False`` returns
+        the engine's result unfiltered.
 
     Returns
     -------
@@ -122,6 +163,19 @@ def solve_dgcv(
     )
     if preprocess_only:
         return list(processed_eqns), list(system_vars)
+    if curate_format is None:
+        curate_format = (
+            get_dgcv_settings_registry().get("_curate_solve_format", True) is not False
+        )
+    uncovered_cache = []
+
+    def _uncovered():
+        if not uncovered_cache:
+            uncovered_cache.append(_uncovered_equations(processed_eqns, system_vars))
+        return uncovered_cache[0]
+
+    if bridge.eds_forms and _uncovered():
+        _warn_uncovered(_uncovered(), len(processed_eqns), bridge)
 
     def _simplify(x):
         if not simplify_result:
@@ -244,7 +298,12 @@ def solve_dgcv(
             custom_succeeded = True
 
     def _run_engine_linsolve():
-        nonlocal preformatted_solutions, engine_linsolve_ran
+        nonlocal preformatted_solutions, engine_linsolve_ran, divisors
+        if curate_format and _uncovered():
+            preformatted_solutions = []
+            divisors = list(_uncovered())
+            engine_linsolve_ran = True
+            return
         try:
             res = _engine_linsolve(processed_eqns, system_vars)
         except Exception:
@@ -253,7 +312,11 @@ def solve_dgcv(
         preformatted_solutions = res or []
 
     def _run_secondary_solve():
-        nonlocal preformatted_solutions
+        nonlocal preformatted_solutions, divisors
+        if curate_format and _uncovered():
+            preformatted_solutions = []
+            divisors = list(_uncovered())
+            return
         res = engine_capability("solve_secondary")(
             list(processed_eqns), list(system_vars)
         )
@@ -264,7 +327,12 @@ def solve_dgcv(
         ]
 
     def _run_engine_solve():
-        nonlocal preformatted_solutions, engine_solve_failed
+        nonlocal preformatted_solutions, engine_solve_failed, divisors
+        if curate_format and _uncovered():
+            preformatted_solutions = []
+            divisors = list(_uncovered())
+            engine_solve_failed = False
+            return
         try:
             if engine_kind() == "sage" and not bridge.standins:
                 res = _engine_solve(eqns, vars_to_solve)

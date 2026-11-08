@@ -3,10 +3,10 @@ import string
 
 from ..._aux._backends._symbolic_router import subs
 from ..._aux._backends._types_and_constants import (
+    _disposable_symbol,
     as_engine_scalar,
     expr_numeric_types,
     is_atomic,
-    symbol,
     to_active_engine,
 )
 from ..._aux._utilities._config import working_namespace
@@ -39,6 +39,10 @@ class SolveBridge:
         self.reverse = {}
         self._by_obj = {}
         self._lifters = {}
+        self.eds_forms = False
+
+    def note_eds_forms(self):
+        self.eds_forms = True
 
     @property
     def symbols(self):
@@ -67,12 +71,12 @@ class SolveBridge:
         hint = str(obj) if hint is None else str(hint)
         identifier = _generate_str_id(hint, self.standins, working_namespace())
         try:
-            sym = symbol(identifier)
+            sym = _disposable_symbol(identifier)
         except Exception:
             identifier = _generate_str_id(
                 _identifier(hint), self.standins, working_namespace()
             )
-            sym = symbol(identifier)
+            sym = _disposable_symbol(identifier)
         self.adopt(identifier, obj, sym)
         return sym
 

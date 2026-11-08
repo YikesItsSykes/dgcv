@@ -74,7 +74,7 @@ def createSimpleLieAlgebra(
             f"Sequence index must be a positive integer, but got: {rank}."
         ) from None
     if kwargs.get("return_created_obj"):  # old keyword support
-        return_created_object = kwargs.get("return_created_object")
+        return_created_object = kwargs.get("return_created_obj")
 
     def _generate_A_series_structure_data(n):
         matrix_dim = n + 1

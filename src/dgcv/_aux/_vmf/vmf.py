@@ -38,7 +38,7 @@ from collections.abc import Iterable, Sequence
 
 from .._backends._display_engine import is_rich_displaying_available
 from .._backends._engine import notify_vmf_cleared
-from .._backends._types_and_constants import is_atomic
+from .._backends._types_and_constants import forget_symbol_assumptions, is_atomic
 from .._utilities._config import (
     dgcv_warning,
     dgcvDeprecationWarning,
@@ -108,6 +108,8 @@ def listVar(
         variable_registry["eds"]["atoms"].keys()
     )  # New zeroFormAtom labels
     coframe_labels = set(variable_registry["eds"]["coframes"].keys())
+    frame_labels = set(variable_registry["eds"].get("frames", {}).keys())
+    jet_space_labels = set(variable_registry["eds"].get("jet_spaces", {}).keys())
 
     selected_labels = set()
     if standard_only:
@@ -119,7 +121,7 @@ def listVar(
     if zeroForms_only:
         selected_labels |= zeroForm_labels
     if coframes_only:
-        selected_labels |= coframe_labels
+        selected_labels |= coframe_labels | frame_labels
 
     all_labels = (
         selected_labels
@@ -129,6 +131,8 @@ def listVar(
         | algebra_labels
         | zeroForm_labels
         | coframe_labels
+        | frame_labels
+        | jet_space_labels
     )
 
     # Apply additional property filters
@@ -143,6 +147,39 @@ def listVar(
     return list(all_labels)
 
 
+def _family_symbols(system_dict):
+    out = []
+    stack = [system_dict.get("family_values", ())]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+        else:
+            out.append(item)
+    return out
+
+
+def _system_exists(registry, p):
+    if not isinstance(p, tuple) or len(p) < 2:
+        return False
+    if p[0] == "eds":
+        return len(p) > 2 and p[1] in registry.get("eds", {}).get(p[2], {})
+    return p[1] in registry.get(p[0], {})
+
+
+def _drop_member(registry, global_vars, name, system_label):
+    paths = registry.get("paths", {})
+    entry = paths.get(name)
+    p = entry.get("path") if isinstance(entry, dict) else None
+    if isinstance(p, tuple) and len(p) > 1:
+        if p[1] != system_label:
+            return
+    elif name != system_label and name in registry.get("_labels", {}):
+        return
+    global_vars.pop(name, None)
+    paths.pop(name, None)
+
+
 def _clearVar_single(label):
     """
     Helper function that clears a single variable system
@@ -150,12 +187,16 @@ def _clearVar_single(label):
     a tuple (system_type, label) indicating what was cleared, intended
     for compilation into a printout.
     """
+    registry = get_variable_registry()
     parent_path = vmf_lookup(label, path=True).get("path", None)
+    if not parent_path and isinstance(label, str):
+        p = registry.get("_labels", {}).get(label, {}).get("path")
+        if _system_exists(registry, p):
+            parent_path = p
     if parent_path:
         label = parent_path[1]
     else:
         return
-    registry = get_variable_registry()
     global_vars = working_namespace()
     cleared_info = None
 
@@ -173,6 +214,7 @@ def _clearVar_single(label):
 
     if system_label is not None and system_label in std:
         system_dict = std[system_label]
+        forget_symbol_assumptions(_family_symbols(system_dict))
         family_names = system_dict.get("family_names", ())
         if isinstance(family_names, str):
             family_names = (family_names,)
@@ -190,8 +232,7 @@ def _clearVar_single(label):
             to_pop.add(f"d_{system_label}")
 
         for name in to_pop:
-            global_vars.pop(name, None)
-            paths.pop(name, None)
+            _drop_member(registry, global_vars, name, system_label)
 
         if system_dict.get("tempVar"):
             registry["temporary_variables"].discard(system_label)
@@ -212,24 +253,20 @@ def _clearVar_single(label):
 
     if branch == "standard_variable_systems":
         system_dict = registry[branch][label]
+        forget_symbol_assumptions(_family_symbols(system_dict))
         family_names = system_dict["family_names"]
         if isinstance(family_names, str):
             family_names = (family_names,)
         for var in family_names:
-            global_vars.pop(var, None)
-            paths.pop(var, None)
+            _drop_member(registry, global_vars, var, label)
         global_vars.pop(label, None)
         paths.pop(label, None)
         if system_dict.get("differential_system"):
             for var in family_names:
-                global_vars.pop(f"D_{var}", None)
-                global_vars.pop(f"d_{var}", None)
-                paths.pop(f"D_{var}", None)
-                paths.pop(f"d_{var}", None)
-            global_vars.pop(f"D_{label}", None)
-            global_vars.pop(f"d_{label}", None)
-            paths.pop(f"D_{label}", None)
-            paths.pop(f"d_{label}", None)
+                _drop_member(registry, global_vars, f"D_{var}", label)
+                _drop_member(registry, global_vars, f"d_{var}", label)
+            _drop_member(registry, global_vars, f"D_{label}", label)
+            _drop_member(registry, global_vars, f"d_{label}", label)
         if system_dict.get("tempVar"):
             registry["temporary_variables"].discard(label)
         if system_dict.get("obsVar"):
@@ -239,23 +276,20 @@ def _clearVar_single(label):
 
     elif branch == "complex_variable_systems":
         system_dict = registry[branch][label]
+        forget_symbol_assumptions(_family_symbols(system_dict))
         family_houses = system_dict["family_houses"]
         real_parent, imag_parent = family_houses[-2], family_houses[-1]
         registry["protected_variables"].discard(real_parent)
         registry["protected_variables"].discard(imag_parent)
         for house in family_houses:
-            global_vars.pop(house, None)
-            paths.pop(house, None)
+            _drop_member(registry, global_vars, house, label)
         variable_relatives = system_dict["variable_relatives"]
         for var_label, var_data in variable_relatives.items():
-            global_vars.pop(var_label, None)
-            paths.pop(var_label, None)
+            _drop_member(registry, global_vars, var_label, label)
             if var_data.get("DFClass"):
-                global_vars.pop(f"D_{var_label}", None)
-                paths.pop(f"D_{var_label}", None)
+                _drop_member(registry, global_vars, f"D_{var_label}", label)
             if var_data.get("VFClass"):
-                global_vars.pop(f"d_{var_label}", None)
-                paths.pop(f"d_{var_label}", None)
+                _drop_member(registry, global_vars, f"d_{var_label}", label)
         conv = registry["conversion_dictionaries"]
 
         for var_label, var_data in variable_relatives.items():
@@ -288,8 +322,7 @@ def _clearVar_single(label):
         system_dict = registry[branch][label]
         family_names = system_dict.get("family_names", ())
         for member in family_names:
-            global_vars.pop(member, None)
-            paths.pop(member, None)
+            _drop_member(registry, global_vars, member, label)
         global_vars.pop(label, None)
         paths.pop(label, None)
         del registry[branch][label]
@@ -301,11 +334,15 @@ def _clearVar_single(label):
         if isinstance(family_names, str):
             family_names = (family_names,)
         for var in family_names:
-            global_vars.pop(var, None)
-            paths.pop(var, None)
+            _drop_member(registry, global_vars, var, label)
         for var in system_dict.get("family_relatives", {}):
+            _drop_member(registry, global_vars, var, label)
+        for var in system_dict.get("retired", ()):
             global_vars.pop(var, None)
-            paths.pop(var, None)
+        for entry in registry["eds"]["coframes"].values():
+            entry["coframe"]._drop_potentials(
+                set(family_names) | set(system_dict.get("family_relatives", ()))
+            )
         global_vars.pop(label, None)
         from ..printing.printing._eds import conjugation_prefix
 
@@ -323,7 +360,40 @@ def _clearVar_single(label):
         global_vars.pop(label, None)
         paths.pop(label, None)
         del registry["eds"]["coframes"][label]
-        cleared_info = ("coframe", (label, cousins_parent, children))
+        cleared_info = (
+            "coframe",
+            (label, cousins_parent, children, coframe_info.get("frame_label")),
+        )
+
+    elif branch == "eds" and path[2] == "frames":
+        frame_info = registry["eds"]["frames"][label]
+        for name in frame_info.get("children", ()) or ():
+            _drop_member(registry, global_vars, name, label)
+        global_vars.pop(label, None)
+        paths.pop(label, None)
+        owner = registry["eds"]["coframes"].get(frame_info.get("coframe"))
+        if owner is not None and owner.get("frame_label") == label:
+            owner["frame_label"] = None
+        frame = frame_info.get("frame")
+        if frame is not None:
+            frame.label = None
+        del registry["eds"]["frames"][label]
+        cleared_info = ("frame", label)
+
+    elif branch == "eds" and path[2] == "jet_spaces":
+        info = registry["eds"]["jet_spaces"][label]
+        space = info.get("space")
+        if space is None or global_vars.get(label) is space:
+            global_vars.pop(label, None)
+        paths.pop(label, None)
+        if space is not None:
+            space._label = None
+            space._systems = ()
+        del registry["eds"]["jet_spaces"][label]
+        cleared_info = (
+            "jet_space",
+            (label, tuple(info.get("coordinate_systems", ()) or ())),
+        )
 
     registry["_labels"].pop(label, None)
 
@@ -336,6 +406,8 @@ def clearVar(*labels, report=True):
     cleared_algebras = []
     cleared_diffFormAtoms = []
     cleared_coframes = []
+    cleared_frames = []
+    cleared_jet_spaces = []
 
     seen = set()
 
@@ -366,14 +438,28 @@ def clearVar(*labels, report=True):
                 seen.add(cleared_label)
                 cleared_diffFormAtoms.append(cleared_label)
 
+        elif system_type == "frame":
+            if ("frame", cleared_label) not in seen:
+                seen.add(("frame", cleared_label))
+                cleared_frames.append(cleared_label)
+
+        elif system_type == "jet_space":
+            space_label, systems = cleared_label
+            if ("jet_space", space_label) not in seen:
+                seen.add(("jet_space", space_label))
+                cleared_jet_spaces.append((space_label, systems))
+                clearVar(*systems, report=False)
+
         elif system_type == "coframe":
-            coframe_label, cousins_system_label, children = cleared_label
+            coframe_label, cousins_system_label, children, frame_label = cleared_label
             if ("coframe", coframe_label) not in seen:
                 seen.add(("coframe", coframe_label))
                 cleared_coframes.append((coframe_label, cousins_system_label))
                 clearVar(*children, report=False)
                 if cousins_system_label is not None:
                     clearVar(cousins_system_label, report=False)
+                if frame_label is not None:
+                    clearVar(frame_label, report=False)
 
     if report:
         if cleared_standard:
@@ -400,6 +486,18 @@ def clearVar(*labels, report=True):
                     print(
                         f"Cleared coframe '{cf_label}' along with its 1-forms and the zero form atom system '{cp_label}'"
                     )
+        if cleared_frames:
+            print(
+                f"Cleared frames from the dgcv variable management framework: {', '.join(cleared_frames)}"
+            )
+        if cleared_jet_spaces:
+            for space_label, systems in cleared_jet_spaces:
+                if systems:
+                    print(
+                        f"Cleared jet space '{space_label}' along with its coordinate systems {', '.join(systems)}"
+                    )
+                else:
+                    print(f"Cleared jet space '{space_label}'")
     if seen:
         notify_vmf_cleared()
 
@@ -473,7 +571,12 @@ def clear_vmf(
         else:
             objects.append(objects_to_clear)
 
-    return clearVar(*objects, report=report)
+    out = clearVar(*objects, report=report)
+    if objects_to_clear is None and "all" in cats and not listVar():
+        registry = get_variable_registry()
+        registry.get("paths", {}).clear()
+        registry.get("_labels", {}).clear()
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -520,6 +623,54 @@ def _eds_lookup(
             out["differential_system"] = None
         return out
 
+    if section == "frames":
+        info = eds.get("frames", {}).get(system_label, {})
+        children = tuple(info.get("children") or ())
+        if name is None:
+            out = {"type": "frame", "sub_type": "frame"}
+        else:
+            out = {"type": "abstract_vector", "sub_type": "frame_element"}
+        if path:
+            out["path"] = ("eds", system_label, "frames") + (
+                (name,) if name is not None else ()
+            )
+        if relatives:
+            out["relatives"] = {
+                "system_label": system_label,
+                "coframe": info.get("coframe"),
+                "frame": info.get("frame"),
+                "basis_labels": children,
+            }
+            if flattened_relatives:
+                out["flattened_relatives"] = children
+        if system_index:
+            out["system_index"] = children.index(name) if name in children else None
+        if differential_system:
+            out["differential_system"] = None
+        return out
+
+    if section == "jet_spaces":
+        info = eds.get("jet_spaces", {}).get(system_label, {})
+        space = info.get("space")
+        out = {"type": "jet_space", "sub_type": "jet_space"}
+        if path:
+            out["path"] = ("eds", system_label, "jet_spaces")
+        if relatives:
+            systems = tuple(info.get("coordinate_systems") or ())
+            out["relatives"] = {
+                "system_label": system_label,
+                "space": space,
+                "coordinate_systems": systems,
+                "coordinates": tuple(getattr(space, "coordinates", ()) or ()),
+            }
+            if flattened_relatives:
+                out["flattened_relatives"] = systems
+        if system_index:
+            out["system_index"] = None
+        if differential_system:
+            out["differential_system"] = None
+        return out
+
     info = eds.get("atoms", {}).get(system_label, {})
     base_kind = (
         "differential_form"
@@ -529,7 +680,7 @@ def _eds_lookup(
     out = {"type": base_kind}
     if name is None:
         out["sub_type"] = "system"
-    elif info.get("real"):
+    elif info.get("real") or "real" in info.get("declared", {}).get(name, ()):
         out["sub_type"] = "real"
     elif str(kind).endswith("_conjugate"):
         out["sub_type"] = "conjugate"
@@ -806,6 +957,56 @@ def vmf_lookup(
                     differential_system,
                 )
         return _out_unregistered()
+    elif category == "abst_frame":
+        for frame_label, info in registry.get("eds", {}).get("frames", {}).items():
+            if info.get("frame") is obj:
+                return _eds_lookup(
+                    registry,
+                    ("eds", frame_label, "frames"),
+                    "frame",
+                    obj,
+                    path,
+                    relatives,
+                    flattened_relatives,
+                    system_index,
+                    differential_system,
+                )
+        return _out_unregistered()
+    elif category == "jet_space":
+        for space_label, info in registry.get("eds", {}).get("jet_spaces", {}).items():
+            if info.get("space") is obj:
+                return _eds_lookup(
+                    registry,
+                    ("eds", space_label, "jet_spaces"),
+                    "jet_space",
+                    obj,
+                    path,
+                    relatives,
+                    flattened_relatives,
+                    system_index,
+                    differential_system,
+                )
+        return _out_unregistered()
+    elif category == "abstVF":
+        frame = getattr(obj, "frame", None)
+        frame_label = getattr(frame, "label", None)
+        info = registry.get("eds", {}).get("frames", {}).get(frame_label)
+        if info is not None and info.get("frame") is frame:
+            children = list(info.get("children") or ())
+            for idx, basis_element in enumerate(frame.basis):
+                if basis_element == obj and idx < len(children):
+                    return _eds_lookup(
+                        registry,
+                        ("eds", frame_label, "frames", children[idx]),
+                        "abstract_vector",
+                        obj,
+                        path,
+                        relatives,
+                        flattened_relatives,
+                        system_index,
+                        differential_system,
+                    )
+        return _out_unregistered()
 
     if not is_atomic(obj):
         return _out_unregistered()
@@ -1017,6 +1218,10 @@ def vmf_summary(
         builders.append(_snapshot_eds_atoms_)
     if vr["eds"]["coframes"] or force_report:
         builders.append(_snapshot_coframes_)
+    if vr["eds"].get("frames") or force_report:
+        builders.append(_snapshot_frames_)
+    if vr["eds"].get("jet_spaces") or force_report:
+        builders.append(_snapshot_jet_spaces_)
 
     if not builders and not force_report:
         print("There are no objects currently registered in the dgcv VMF.")
@@ -1254,6 +1459,14 @@ def _vmf_plain_build_sections(vr: dict, *, force_report: bool) -> list[str]:
     if s or force_report:
         if s:
             out.append(s)
+    s = _vmf_plain_snapshot_frames(vr)
+    if s or force_report:
+        if s:
+            out.append(s)
+    s = _vmf_plain_snapshot_jet_spaces(vr)
+    if s or force_report:
+        if s:
+            out.append(s)
     return out
 
 
@@ -1416,6 +1629,44 @@ def _vmf_plain_snapshot_eds_atoms(vr: dict) -> str:
         pc = system.get("primary_coframe", None)
         lines.append(
             f"      - primary coframe: {str(pc) if pc is not None else '----'}"
+        )
+
+    return "\n".join(lines).rstrip()
+
+
+def _vmf_plain_snapshot_frames(vr: dict) -> str:
+    frames = (vr.get("eds", {}) or {}).get("frames", {}) or {}
+    keys = sorted(frames.keys())
+    if not keys:
+        return ""
+
+    lines: list[str] = [f"=== Frames ({len(keys)}) ==="]
+    for label in keys:
+        info = frames.get(label, {}) or {}
+        basis = list(info.get("children", []) or [])
+        coframe = info.get("coframe")
+        tail = f" (dual to {coframe})" if coframe is not None else ""
+        lines.append(f"  - {label} = {_vmf_plain_fmt_span(basis, max_items=12)}{tail}")
+
+    return "\n".join(lines).rstrip()
+
+
+def _vmf_plain_snapshot_jet_spaces(vr: dict) -> str:
+    spaces = (vr.get("eds", {}) or {}).get("jet_spaces", {}) or {}
+    keys = sorted(spaces.keys())
+    if not keys:
+        return ""
+
+    lines: list[str] = [f"=== Jet Spaces ({len(keys)}) ==="]
+    for label in keys:
+        info = spaces.get(label, {}) or {}
+        space = info.get("space")
+        coordinates = list(getattr(space, "coordinates", ()) or ())
+        systems = list(info.get("coordinate_systems", []) or [])
+        head = repr(space) if space is not None else "jetSpace"
+        lines.append(
+            f"  - {label} = {head}: {_vmf_plain_fmt_span(coordinates, max_items=12)}"
+            f" [systems {_vmf_plain_fmt_list(systems, max_items=12)}]"
         )
 
     return "\n".join(lines).rstrip()
@@ -1966,19 +2217,7 @@ def _snapshot_eds_atoms_(style=None, use_latex=None, slim=False, **kwargs):
     )
 
 
-def _snapshot_coframes_(style=None, use_latex=None, slim=False, **kwargs):
-    """
-    Returns a summary table listing coframes in the VMF scope
-    """
-    if style is None:
-        style = get_dgcv_settings_registry()["theme"]
-    if use_latex is None:
-        use_latex = get_dgcv_settings_registry()["use_latex"]
-
-    vr = get_variable_registry()
-    coframes_registry = (vr.get("eds", {}) or {}).get("coframes", {}) or {}
-    global_dict = working_namespace()
-
+def _summary_formatters(use_latex):
     def _latex_of(obj):
         try:
             if hasattr(obj, "_repr_latex_"):
@@ -2007,6 +2246,24 @@ def _snapshot_coframes_(style=None, use_latex=None, slim=False, **kwargs):
         if len(xs) > 3:
             return f"{_fmt_one(xs[0])}, ..., {_fmt_one(xs[-1])}"
         return ", ".join(_fmt_one(x) for x in xs)
+
+    return _fmt_one, _fmt_list
+
+
+def _snapshot_coframes_(style=None, use_latex=None, slim=False, **kwargs):
+    """
+    Returns a summary table listing coframes in the VMF scope
+    """
+    if style is None:
+        style = get_dgcv_settings_registry()["theme"]
+    if use_latex is None:
+        use_latex = get_dgcv_settings_registry()["use_latex"]
+
+    vr = get_variable_registry()
+    coframes_registry = (vr.get("eds", {}) or {}).get("coframes", {}) or {}
+    global_dict = working_namespace()
+
+    _fmt_one, _fmt_list = _summary_formatters(use_latex)
 
     rows = []
     for label, system in sorted(coframes_registry.items()):
@@ -2056,6 +2313,103 @@ def _snapshot_coframes_(style=None, use_latex=None, slim=False, **kwargs):
         **kwargs,
     )
     return view
+
+
+def _eds_summary_table(columns, rows, caption, style, slim, **kwargs):
+    theme_vars = get_style(style, legacy=False, minimal=True)
+    extra_css = """
+    .dgcv-data-table td, .dgcv-data-table th {
+        text-align: left;
+    }
+    """
+    return build_plain_table(
+        columns=columns,
+        rows=rows,
+        caption=caption,
+        theme_css_vars=theme_vars,
+        extra_css=extra_css,
+        table_attrs='style="table-layout:auto; overflow-x:auto;"',
+        cell_align=None,
+        escape_cells=False,
+        escape_headers=True,
+        nowrap=False,
+        slim=slim,
+        truncate_chars=None,
+        **kwargs,
+    )
+
+
+def _snapshot_frames_(style=None, use_latex=None, slim=False, **kwargs):
+    if style is None:
+        style = get_dgcv_settings_registry()["theme"]
+    if use_latex is None:
+        use_latex = get_dgcv_settings_registry()["use_latex"]
+
+    vr = get_variable_registry()
+    frames_registry = (vr.get("eds", {}) or {}).get("frames", {}) or {}
+    _fmt_one, _fmt_list = _summary_formatters(use_latex)
+
+    rows = []
+    for label, info in sorted(frames_registry.items()):
+        frame = info.get("frame")
+        basis = list(getattr(frame, "basis", None) or []) or list(
+            info.get("children", []) or []
+        )
+        coframe_label = info.get("coframe")
+        if coframe_label is None:
+            forms = getattr(getattr(frame, "coframe", None), "forms", None) or []
+            dual_cell = _fmt_list(forms)
+        else:
+            dual_cell = coframe_label
+        rows.append([label, _fmt_list(basis), dual_cell])
+
+    return _eds_summary_table(
+        ["Frame Label", "Basis Vectors", "Dual Coframe"],
+        rows,
+        "Initialized Abstract Frames",
+        style,
+        slim,
+        **kwargs,
+    )
+
+
+def _snapshot_jet_spaces_(style=None, use_latex=None, slim=False, **kwargs):
+    if style is None:
+        style = get_dgcv_settings_registry()["theme"]
+    if use_latex is None:
+        use_latex = get_dgcv_settings_registry()["use_latex"]
+
+    vr = get_variable_registry()
+    spaces_registry = (vr.get("eds", {}) or {}).get("jet_spaces", {}) or {}
+    _fmt_one, _fmt_list = _summary_formatters(use_latex)
+
+    rows = []
+    for label, info in sorted(spaces_registry.items()):
+        space = info.get("space")
+        if space is None:
+            head = "jetSpace"
+        elif use_latex:
+            head = f"$J^{{{space.k}}}({space.n}, {space.m})$"
+        else:
+            head = repr(space)
+        systems = list(info.get("coordinate_systems", []) or [])
+        rows.append(
+            [
+                label,
+                head,
+                _fmt_list(getattr(space, "coordinates", ()) or ()),
+                ", ".join(systems),
+            ]
+        )
+
+    return _eds_summary_table(
+        ["Label", "Jet Space", "Coordinates", "Coordinate Systems"],
+        rows,
+        "Initialized Jet Spaces",
+        style,
+        slim,
+        **kwargs,
+    )
 
 
 # -----------------------------------------------------------------------------

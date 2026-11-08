@@ -25,6 +25,7 @@ def annihilator(
     filter_to_basis_over_number_field: bool = False,
     *,
     coherent_coordinates_checked: bool = False,
+    frame=None,
     **kwargs,
 ):
     """
@@ -110,6 +111,14 @@ def annihilator(
 
     [8*D_x0, -16*x1*D_x2 + 8*D_x3, 8*D_y0, -16*x1*D_y2 + 8*D_y3]
     """
+    if frame is not None or query_dgcv_categories(objList, {"eds_form"}) or (
+        not get_dgcv_category(objList)
+        and all(query_dgcv_categories(o, {"eds_form"}) for o in objList)
+        and len(list(objList)) > 0
+    ):
+        from ...eds._vectors import annihilator as _eds_annihilator
+
+        return _eds_annihilator(objList, frame=frame)
     if get_dgcv_category(objList) in {
         "tensor_field",
         "algebra_element",

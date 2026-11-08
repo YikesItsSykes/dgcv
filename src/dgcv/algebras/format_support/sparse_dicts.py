@@ -1,6 +1,7 @@
 import numbers
 
 from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols
+from ..._aux._utilities._config import dgcv_warning
 from ...core.arrays import matrix_dgcv
 from ..linear_algebra import _is_canonical_structure_array, _structure_array
 
@@ -113,6 +114,9 @@ def _normalize_sparse_structure(items, *, dim=None, assume_skew=False):
     if dim is None:
         if arity == 3:
             dim = max_index + 1
+            dgcv_warning(
+                f"The algebra dimension {dim} was inferred from the largest index in the structure data; pass `dimension=` to set it explicitly."
+            )
         else:
             dim = common_length if common_length is not None else 0
     if max_index >= dim:

@@ -2,7 +2,7 @@ import operator
 
 from ..._aux._backends._symbolic_router import subs
 from ..._aux._backends._types_and_constants import is_atomic
-from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
+from ..._aux._utilities._config import dgcv_warning
 
 
 def _is_relation(obj):
@@ -54,8 +54,6 @@ def _sage_branch_to_dict(branch, wanted):
 
 
 def _warn_dropped_branches(dropped):
-    if get_dgcv_settings_registry().get("forgo_warnings", False):
-        return
     shown = str(dropped[0]).replace("\n", " ")
     if len(shown) > 120:
         shown = shown[:117] + "..."

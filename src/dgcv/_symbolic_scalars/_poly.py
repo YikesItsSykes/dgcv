@@ -21,6 +21,7 @@ K_INVERSE_HYPERBOLIC = 128
 K_RADICAL = 256
 K_FUNCTION = 512
 K_MOVES = 1024
+K_POWER = 2048
 _gen_ids = {I: I_GEN}
 _gen_leaves = [I]
 GEN_KIND = [K_IMAGINARY]
@@ -44,6 +45,10 @@ _kinds_stale = [False]
 
 def leaf_kind(leaf):
     return 0
+
+
+def invalidate_kinds():
+    _kinds_stale[0] = True
 
 
 def refresh_kinds():

@@ -4,6 +4,7 @@ import numbers
 
 from .._aux._backends._symbolic_router import (
     _scalar_is_zero,
+    conjugate,
     get_free_symbols,
     ratio,
     simplify,
@@ -11,12 +12,18 @@ from .._aux._backends._symbolic_router import (
 )
 from .._aux._backends._types_and_constants import expr_numeric_types, expr_types
 from .._aux._utilities._misc import zip_sum
-from .._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
+from .._aux._vmf._safeguards import (
+    get_dgcv_category,
+    query_dgcv_categories,
+    retrieve_passkey,
+)
 from ..core.base import dgcv_class
 from ..core.tensors import tensorProduct
 
 
 class subalgebra_element(dgcv_class):
+    _dgcv_categories = {"subalgebra_element", "vs_element"}
+
     def __init__(self, alg, coeff_dict, valence, ambient_rep=None, _internalLock=None):
         self.algebra = alg
         self.vectorSpace = alg
@@ -141,6 +148,13 @@ class subalgebra_element(dgcv_class):
 
     def subs(self, subsData):
         newCoeffs = {k: subs(v, subsData) for k, v in self.coeff_dict.items()}
+        return subalgebra_element(self.algebra, newCoeffs, self.valence)
+
+    def _eval_conjugate(self):
+        return self.__dgcv_conjugate__()
+
+    def __dgcv_conjugate__(self, symbolic=False):
+        newCoeffs = {k: conjugate(v, symbolic=symbolic) for k, v in self.coeff_dict.items()}
         return subalgebra_element(self.algebra, newCoeffs, self.valence)
 
     def dual(self):
@@ -303,7 +317,9 @@ class subalgebra_element(dgcv_class):
                 return self.ambient_rep * other.ambient_rep
             else:
                 return self._convert_to_tp().__mul__(other)
-        elif isinstance(other, expr_numeric_types()):
+        elif isinstance(other, expr_numeric_types()) or query_dgcv_categories(
+            other, "eds_scalar"
+        ):
             new_coeffs = {
                 idx: self._si_wrap(coeff * other)
                 for idx, coeff in self.coeff_dict.items()
@@ -316,14 +332,16 @@ class subalgebra_element(dgcv_class):
         return NotImplemented
 
     def __rmul__(self, other):
-        if isinstance(other, expr_numeric_types()):
+        if isinstance(other, expr_numeric_types()) or query_dgcv_categories(
+            other, "eds_scalar"
+        ):
             return self * other
         return NotImplemented
 
     def __truediv__(self, other):
         if isinstance(other, numbers.Number):
             return self._si_wrap(ratio(1, other) * self)
-        elif isinstance(other, expr_types()):
+        elif isinstance(other, expr_types()) or query_dgcv_categories(other, "eds_scalar"):
             return self._si_wrap((1 / other) * self)
         else:
             raise TypeError(

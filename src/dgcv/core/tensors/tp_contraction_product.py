@@ -1,9 +1,9 @@
 from collections import Counter
 
-from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._vmf._safeguards import get_dgcv_category
 from ..combinatorics.combinatorics import shufflings
 from ..dgcv_core.spaces.spaces import card_root
+from ._protocol import _is_scalar, _is_vs_element, _vs_bracket
 from .promotion import _resolve_binary_promotions
 
 
@@ -55,7 +55,7 @@ class _tp_contraction_product:
                             )
                         else:
                             return 0 * self
-            elif get_dgcv_category(other) == "algebra_element":
+            elif _is_vs_element(other):
                 if val0 == other.valence:
                     elem = (
                         v * (card0.space.basis[idx0])
@@ -109,12 +109,12 @@ class _tp_contraction_product:
                                     if val1 == 1
                                     else v2 * (card1.space.basis[idx1].dual())
                                 )
-                                nd = elem1 * elem2
+                                nd = _vs_bracket(elem1, elem2)
                                 if hasattr(nd, "_convert_to_tp"):
                                     nd = nd._convert_to_tp().coeff_dict
                                 elif hasattr(nd, "coeff_dict"):
                                     nd = nd.coeff_dict
-                                elif isinstance(nd, expr_numeric_types()):
+                                elif _is_scalar(nd):
                                     nd = {tuple(): nd}
                                 else:
                                     raise RuntimeError(
@@ -135,7 +135,7 @@ class _tp_contraction_product:
                                 nd = nd._convert_to_tp().coeff_dict
                             elif hasattr(nd, "coeff_dict"):
                                 nd = nd.coeff_dict
-                            elif isinstance(nd, expr_numeric_types()):
+                            elif _is_scalar(nd):
                                 nd = {tuple(): nd}
                             else:
                                 raise RuntimeError(
@@ -161,7 +161,7 @@ class _tp_contraction_product:
                                     nd = nd._convert_to_tp().coeff_dict
                                 elif hasattr(nd, "coeff_dict"):
                                     nd = nd.coeff_dict
-                                elif isinstance(nd, expr_numeric_types()):
+                                elif _is_scalar(nd):
                                     nd = {tuple(): nd}
                                 else:
                                     raise RuntimeError(
@@ -186,7 +186,7 @@ class _tp_contraction_product:
                                     nd = nd._convert_to_tp().coeff_dict
                                 elif hasattr(nd, "coeff_dict"):
                                     nd = nd.coeff_dict
-                                elif isinstance(nd, expr_numeric_types()):
+                                elif _is_scalar(nd):
                                     nd = {tuple(): nd}
                                 else:
                                     raise RuntimeError(
@@ -200,10 +200,7 @@ class _tp_contraction_product:
                     f"Unsupported operation for * between the given object types: {type(self)} and {type(other)}; `other` dgcv type is {get_dgcv_category(other)}."
                 )
         else:
-            if get_dgcv_category(other) in {
-                "subalgebra_element",
-                "algebra_element",
-            }:
+            if _is_vs_element(other):
                 if (
                     card_root(k[-1][2]) != k[-1][2]
                     and k[-1][2] != other.card
@@ -223,7 +220,7 @@ class _tp_contraction_product:
                 if k[-1][1] != other.valence:
                     locElem = (
                         other.ambient_rep
-                        if k[-1][2] == other.algebra.ambient.card
+                        if k[-1][2] == other.card.root
                         else other
                     )
                     if k[-1][2] == locElem.card:
@@ -231,7 +228,7 @@ class _tp_contraction_product:
                 if k[0][1] != other.valence:
                     locElem = (
                         other.ambient_rep
-                        if k[0][2] == other.algebra.ambient.card
+                        if k[0][2] == other.card.root
                         else other
                     )
                     if k[0][2] == locElem.card:
@@ -264,7 +261,7 @@ class _tp_contraction_product:
                             nd = nd.coeff_dict
                         elif hasattr(nd, "_convert_to_tp"):
                             nd = nd._convert_to_tp().coeff_dict
-                        elif isinstance(nd, expr_numeric_types()):
+                        elif _is_scalar(nd):
                             nd = {tuple(): nd}
                         else:
                             raise RuntimeError(
@@ -331,16 +328,12 @@ class _tp_contraction_product:
 
     def __mul__(self, other):
         """Overload * to compute the contraction product, with special logic for algebra_element."""
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             new_coeff_dict = {
                 key: value * other for key, value in self.coeff_dict.items()
             }
             return tensorProduct(new_coeff_dict)
-        if get_dgcv_category(other) in {
-            "subalgebra_element",
-            "algebra_element",
-            "tensorProduct",
-        }:
+        if _is_vs_element(other) or get_dgcv_category(other) == "tensorProduct":
             return self._contraction_product(other)
         else:
             raise ValueError(
@@ -348,15 +341,12 @@ class _tp_contraction_product:
             )
 
     def __rmul__(self, other):
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             new_coeff_dict = {
                 key: value * other for key, value in self.coeff_dict.items()
             }
             return tensorProduct(new_coeff_dict)
-        if get_dgcv_category(other) in {
-            "subalgebra_element",
-            "algebra_element",
-        }:
+        if _is_vs_element(other):
             return other._convert_to_tp()._contraction_product(self)
         else:
             raise ValueError(

@@ -1,6 +1,6 @@
 from fractions import Fraction
 
-from ..._aux._backends._engine import engine_kind
+from ..._aux._backends._engine import engine_capability, engine_kind
 from ..._aux._backends._exact_arith import exact_reciprocal, ratio
 from ..._aux._backends._symbolic_router import (
     _fast_simplify,
@@ -99,7 +99,13 @@ def _pivot_is_zero(value):
     if _scalar_is_zero(value):
         return True
     if engine_kind() == "builtin" and getattr(value, "_nf_cache", None) is not None:
-        return False
+        needs = engine_capability("needs_zero_by_exp")
+        if needs is None or not needs(value):
+            return False
+        try:
+            return bool(engine_capability("zero_by_exp")(value))
+        except (ZeroDivisionError, NotImplementedError):
+            return False
     if _certainly_nonzero(value):
         return False
     if _expands_to_zero(value):
@@ -120,7 +126,11 @@ def _eliminate(
     simplify_steps=False,
     fast_only=False,
     want_pivmap=False,
+    zero_test=None,
+    simplifier=None,
 ):
+    is_zero = _pivot_is_zero if zero_test is None else zero_test
+    simplify_entry = _fast_simplify if simplifier is None else simplifier
     row_count = len(work_rows)
     total_cols = len(work_rows[0]) if row_count else 0
     col_count = total_cols - rhs_cols
@@ -139,7 +149,7 @@ def _eliminate(
     for col_idx in range(col_count):
         pivot_row = None
         for scan_row in range(pivot_index, row_count):
-            if not _pivot_is_zero(work_rows[scan_row][col_idx]):
+            if not is_zero(work_rows[scan_row][col_idx]):
                 pivot_row = scan_row
                 break
         if pivot_row is None:
@@ -162,14 +172,14 @@ def _eliminate(
                     continue
                 entry = entry * inv_pivot
                 if do_simplify and not isinstance(entry, constant_scalar_types()):
-                    entry = _fast_simplify(entry)
+                    entry = simplify_entry(entry)
                 work_rows[pivot_index][entry_idx] = entry
 
         for row_idx in range(row_count):
             if row_idx == pivot_index:
                 continue
             factor = work_rows[row_idx][col_idx]
-            if _pivot_is_zero(factor):
+            if is_zero(factor):
                 continue
             for entry_idx in range(col_idx, total_cols):
                 pivot_entry = work_rows[pivot_index][entry_idx]
@@ -177,7 +187,7 @@ def _eliminate(
                     continue
                 value = work_rows[row_idx][entry_idx] - factor * pivot_entry
                 if do_simplify and not isinstance(value, constant_scalar_types()):
-                    value = _fast_simplify(value)
+                    value = simplify_entry(value)
                 work_rows[row_idx][entry_idx] = value
 
         pivcol_to_row[col_idx] = pivot_index
@@ -320,6 +330,8 @@ class _matrix_linalg:
         allow_formal_inverse=False,
         simplify_steps=False,
         record_divisors=False,
+        zero_test=None,
+        simplifier=None,
     ):
         if self.nrows == 0 or self.ncols == 0:
             if record_divisors:
@@ -340,13 +352,15 @@ class _matrix_linalg:
             simplify_steps=simplify_steps,
             fast_only=fast_case,
             want_pivmap=False,
+            zero_test=zero_test,
+            simplifier=simplifier,
         )
         if record_divisors:
             return rank_value, divisors
         return rank_value
 
     def solve_right_batch(
-        self, rhs, *, allow_formal_inverse=True, simplify_steps=False
+        self, rhs, *, allow_formal_inverse=True, simplify_steps=False, zero_test=None
     ):
         n_unknowns = self.ncols
         rhs_matrix = rhs if isinstance(rhs, matrix_dgcv) else matrix_dgcv(rhs)
@@ -374,14 +388,16 @@ class _matrix_linalg:
             simplify_steps=simplify_steps,
             fast_only=False,
             want_pivmap=True,
+            zero_test=zero_test,
         )
 
+        is_zero = _pivot_is_zero if zero_test is None else zero_test
         inconsistent = set()
         for row in work_rows:
-            if any(not _pivot_is_zero(row[col]) for col in range(n_unknowns)):
+            if any(not is_zero(row[col]) for col in range(n_unknowns)):
                 continue
             for idx in range(n_rhs):
-                if not _pivot_is_zero(row[n_unknowns + idx]):
+                if not is_zero(row[n_unknowns + idx]):
                     inconsistent.add(idx)
 
         solutions = [[0] * n_unknowns for _ in range(n_rhs)]
@@ -392,7 +408,7 @@ class _matrix_linalg:
         free_cols = [col for col in range(n_unknowns) if col not in pivcol_to_row]
         return solutions, inconsistent, free_cols
 
-    def pivot_columns(self, record_divisors=False, simplify_steps=False):
+    def pivot_columns(self, record_divisors=False, simplify_steps=False, zero_test=None):
         if self.nrows == 0 or self.ncols == 0:
             return ([], []) if record_divisors else []
 
@@ -408,12 +424,13 @@ class _matrix_linalg:
             simplify_steps=simplify_steps,
             fast_only=fast_case,
             want_pivmap=True,
+            zero_test=zero_test,
         )
         if record_divisors:
             return pivot_cols, (divisors or [])
         return pivot_cols
 
-    def nullspace(self):
+    def nullspace(self, zero_test=None):
         row_count = self.nrows
         col_count = self.ncols
 
@@ -436,6 +453,7 @@ class _matrix_linalg:
             simplify_steps=False,
             fast_only=False,
             want_pivmap=True,
+            zero_test=zero_test,
         )
 
         free_cols = [idx for idx in range(col_count) if idx not in pivcol_to_row]
@@ -467,6 +485,7 @@ class _matrix_linalg:
         stamp_divisors=False,
         allow_formal_inverse=True,
         parametric_vars=None,
+        zero_test=None,
     ):
         if self.nrows == 0:
             sol = [] if (getattr(b, "nrows", 0) == 0) else None
@@ -496,10 +515,12 @@ class _matrix_linalg:
             simplify_steps=simplify_steps,
             fast_only=fast_case,
             want_pivmap=True,
+            zero_test=zero_test,
         )
 
+        is_zero = _pivot_is_zero if zero_test is None else zero_test
         for row_idx in range(_rank, row_count):
-            if not _pivot_is_zero(work_rows[row_idx][col_count]):
+            if not is_zero(work_rows[row_idx][col_count]):
                 out = None
                 if return_divisors:
                     divisor_list = divisors or []

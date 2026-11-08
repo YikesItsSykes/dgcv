@@ -11,6 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 from .._aux._backends._engine import engine_capability, engine_kind, engine_module
+from .._aux._backends._types_and_constants import _get_sympy_conj_head
 from .._aux._vmf._function_arguments import (
     complete_function_arguments,
     function_properties,
@@ -69,7 +70,7 @@ def _sympy_function_dgcv(name, real=False, deriv_style="subscript"):
                 a = self.args[k]
                 if isinstance(a, sp.Symbol):
                     lab = _process_label(str(a)) if tex else str(a)
-                elif isinstance(a, sp.conjugate) and isinstance(a.args[0], sp.Symbol):
+                elif isinstance(a, _get_sympy_conj_head()) and isinstance(a.args[0], sp.Symbol):
                     inner = a.args[0]
                     lab = (
                         f"\\overline{{{_process_label(str(inner))}}}"

@@ -18,12 +18,19 @@ Licensed under the Apache License, Version 2.0
 SPDX-License-Identifier: Apache-2.0
 """
 
-from .._aux._backends._types_and_constants import symbol
-from .._aux._vmf._safeguards import create_key, validate_label
+from .._aux._backends._symbolic_router import _scalar_is_zero
+from .._aux._backends._types_and_constants import _disposable_symbols
+from .._aux._vmf._safeguards import create_key, validate_creator_labels, validate_label
+from . import _bridges
 from ._calculus import extDer
 from ._coframes import abstract_coframe
-from ._creators import _DFFactory, _register_coframe
-from ._forms import abstract_differential_form, abstract_differential_form_atom, abstract_differential_form_monomial
+from ._creators import _DFFactory, _register_coframe, _register_frame, _register_primary
+from ._forms import (
+    abstract_differential_form,
+    abstract_differential_form_atom,
+    abstract_differential_form_monomial,
+)
+from ._vectors import abstract_frame
 
 
 def transform_coframe(
@@ -31,9 +38,24 @@ def transform_coframe(
     transformations: list | tuple | dict,
     new_coframe_basis=None,
     new_coframe_labels=None,
-    min_conj_rules={},
+    min_conj_rules=None,
     label=None,
+    frame_labels=None,
+    frame_label=None,
 ):
+    if min_conj_rules is None:
+        min_conj_rules = {}
+    if frame_labels is not None:
+        if label is None:
+            raise TypeError("`frame_labels` registers the dual frame, which needs the new coframe's `label`")
+        frame_labels = [str(name) for name in frame_labels]
+        if len(frame_labels) != len(original_coframe.forms):
+            raise ValueError(
+                f"the dual frame needs {len(original_coframe.forms)} labels; received {len(frame_labels)}"
+            )
+        if frame_label is None:
+            frame_label = f"{label}_frame"
+        validate_creator_labels("eds_frames", (frame_label,), frame_labels)
     original_basis = original_coframe.forms
     if new_coframe_basis is None:
         if (
@@ -78,7 +100,7 @@ def transform_coframe(
     ):
         new_basis = transformations
     else:
-        if len(min_conj_rules) == {}:
+        if not min_conj_rules:
             raise TypeError(
                 f"transformation rules given to `transform_coframe` must be either a dictionary (or dict-like list of pairs) whose keys belong to the old coframe basis and whose values are the new DF they transform to, or a list of new DF with proper length expressed in terms of the old basis: not {transformations}"
             )
@@ -95,20 +117,24 @@ def transform_coframe(
             new_basis_squares += [el1 * el2]
             new_basis_squares_labels += [el1Alt * el2Alt]
     varLabel = create_key(prefix="coeff")
-    cVars = [symbol(f"{varLabel}{idx}") for idx in range(len(new_basis_squares))]
-    general_elem = sum(
-        [j * k for j, k in zip(cVars[1:], new_basis_squares[1:])],
-        cVars[0] * new_basis_squares[0],
-    )
-    general_elem_new_basis = sum(
-        [j * k for j, k in zip(cVars[1:], new_basis_squares_labels[1:])],
-        cVars[0] * new_basis_squares_labels[0],
-    )
+    cVars = _disposable_symbols(varLabel, len(new_basis_squares))
     new_structure_eqns = dict()
+    if new_basis_squares:
+        general_elem = sum(
+            [j * k for j, k in zip(cVars[1:], new_basis_squares[1:])],
+            cVars[0] * new_basis_squares[0],
+        )
+        general_elem_new_basis = sum(
+            [j * k for j, k in zip(cVars[1:], new_basis_squares_labels[1:])],
+            cVars[0] * new_basis_squares_labels[0],
+        )
 
     for df_atom, df in zip(new_coframe_basis, new_basis):
         from ..core.solvers import solve_dgcv
 
+        if not new_basis_squares:
+            new_structure_eqns[df_atom] = abstract_differential_form([])
+            continue
         new_extD = extDer(df, original_coframe)
         eqns = [new_extD - general_elem]
         solution = solve_dgcv(
@@ -125,14 +151,40 @@ def transform_coframe(
             raise ValueError(
                 "Unable to compute new coframe structure equations w.r.t. given transformation rule"
             )
-        new_structure_eqns |= {df_atom: general_elem_new_basis.subs(solution[0])}
+        value = general_elem_new_basis.subs(solution[0])
+        if not isinstance(value, abstract_differential_form):
+            value = abstract_differential_form([value] if not _scalar_is_zero(value) else [])
+        new_structure_eqns |= {df_atom: value}
 
+    frame, coordinate_forms, parameters = _bridges.transformed_slots(
+        original_coframe, new_basis
+    )
+    if coordinate_forms is not None:
+        potentials = _bridges.coordinate_potentials(new_coframe_basis, coordinate_forms, parameters)
+        potential_index = None
+    else:
+        potentials, potential_index = _bridges.transformed_potentials(
+            original_coframe, new_coframe_basis, new_basis
+        )
     new_coframe = abstract_coframe(
-        new_coframe_basis, new_structure_eqns, min_conj_rules=min_conj_rules
+        new_coframe_basis,
+        new_structure_eqns,
+        min_conj_rules=min_conj_rules,
+        frame=frame,
+        coordinate_forms=coordinate_forms,
+        parameters=parameters,
+        potentials=potentials,
+        potential_index=potential_index,
     )
     if label is not None:
         label = validate_label(label)
         _register_coframe(
             label, new_coframe, [form.label for form in new_coframe_basis], [], None
         )
+        _register_primary(new_coframe, only_unset=True)
+        if frame_labels is not None:
+            frame_label = validate_label(frame_label)
+            frame = abstract_frame(new_coframe, frame_labels, frame_label)
+            new_coframe._abstract_frame = frame
+            _register_frame(frame_label, frame, frame_labels)
     return new_coframe

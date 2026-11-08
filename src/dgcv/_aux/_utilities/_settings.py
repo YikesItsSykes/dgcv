@@ -94,17 +94,7 @@ def set_dgcv_settings(
     _parallel_sites=_UNSET,
     **kwargs,
 ):
-    if kwargs.pop("quick_notebook", False):
-        set_dgcv_settings(
-            format_displays=True,
-            use_latex=True,
-            print_style="readable",
-            ask_before_overwriting_objects_in_vmf=False,
-            forgo_warnings=True,
-            extra_support_for_math_in_tables=True,
-            force_rich_display=True,
-        )
-        print("Applied the `quick_notebook` settings.")
+    quick_notebook = kwargs.pop("quick_notebook", False)
     dgcvSR = get_dgcv_settings_registry()
 
     # deprecated_keywords
@@ -265,7 +255,7 @@ def set_dgcv_settings(
                     "at the start of a session with dgcv."
                 )
                 return
-            if v == get_dgcv_settings_registry.get("conjugation_prefix"):
+            if v == get_dgcv_settings_registry().get("conjugation_prefix"):
                 newfallback = "BAR" if v != "BAR" else "Banti_R"
                 dgcv_warning(
                     "The requested `fallback_conjugate_prefix` is already assigned to `conjugation_prefix`."
@@ -310,6 +300,23 @@ def set_dgcv_settings(
                 _apply_keyval(k, v)
 
         dgcvSR["version_specific_defaults"] = requested_vsd
+
+    if quick_notebook:
+        if format_displays is None:
+            format_displays = True
+        if use_latex is None:
+            use_latex = True
+        if print_style is None:
+            print_style = "readable"
+        if ask_before_overwriting_objects_in_vmf is None:
+            ask_before_overwriting_objects_in_vmf = False
+        if forgo_warnings is None:
+            forgo_warnings = True
+        if extra_support_for_math_in_tables is None:
+            extra_support_for_math_in_tables = True
+        if force_rich_display is None:
+            force_rich_display = True
+        print("Applied the `quick_notebook` settings.")
 
     effective_vsd = (
         requested_vsd
@@ -658,5 +665,7 @@ def reset_dgcv_settings():
         }
     )
 
+    detach_sympy_hook(dgcv_class)
+    detach_legacy_sympy_converters()
     invalidate_engine_cache()
     invalidate_notebook_cache()

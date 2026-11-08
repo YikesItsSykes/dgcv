@@ -72,14 +72,21 @@ def tensor_VS_printer(tp) -> str:
             ]
         return BL[card][idx]
 
+    def dual_labler(idx, card) -> str:
+        labels = getattr(card.space, "dual_basis_labels", None)
+        if labels is not None:
+            return labels[idx]
+        return f"{labler(idx, card)}{dual_plain}"
+
     formatted_terms: list[str] = []
     for vec, scalar in terms.items():
         if _scalar_is_zero(scalar):
             continue
+        if not vec:
+            formatted_terms.append(str(scalar))
+            continue
         basis_elements = [
-            labler(index, card)
-            if valence == 1
-            else f"{labler(index, card)}{dual_plain}"
+            labler(index, card) if valence == 1 else dual_labler(index, card)
             for index, valence, card in vec
         ]
         basis = joiner.join(basis_elements)
@@ -144,14 +151,18 @@ def tensor_latex_helper(tp) -> str:
     def labler(idx, card) -> str:
         return card.space.basis[idx]._repr_latex_(raw=True)
 
+    def dual_labler(idx, card) -> str:
+        labels = getattr(card.space, "_tex_dual_basis_labels", None)
+        if labels is not None:
+            return labels[idx]
+        return rf"{_pwrap_for_dual(labler(idx, card))}^{dual_latex}"
+
     formatted_terms: list[str] = []
     for vec, scalar in terms.items():
         if _scalar_is_zero(scalar):
             continue
         basis_elements = [
-            labler(index, card)
-            if valence == 1
-            else rf"{_pwrap_for_dual(labler(index, card))}^{dual_latex}"
+            labler(index, card) if valence == 1 else dual_labler(index, card)
             for index, valence, card in vec
         ]
         basis = joiner.join(basis_elements)

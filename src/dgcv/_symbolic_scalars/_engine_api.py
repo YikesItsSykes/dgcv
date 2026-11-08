@@ -20,6 +20,7 @@ from ._linsolve import builtin_build_and_solve
 from ._normal_form import RF, nf_from_base, rf_number
 from ._polynomials import complex_poly_terms, linear_form, poly_terms, primitive_factors
 from ._probes import basis_pick
+from ._rewrite import _TIER_KINDS, zero_by_exp
 from ._secondary import (
     groebner_with_secondary,
     integrate,
@@ -95,7 +96,18 @@ dgcv_capabilities = {
     "generic_constants": GenericConstants,
     "exact_nonzero": _bindings.exact_nonzero,
     "scalars_equal": _bindings.scalars_equal,
+    "zero_by_exp": zero_by_exp,
+    "needs_zero_by_exp": lambda expr: needs_zero_by_exp(expr),
 }
+
+
+def needs_zero_by_exp(expr):
+    rf = getattr(expr, "_nf_cache", None)
+    if rf is None:
+        return False
+    if rf.kinds() & _TIER_KINDS:
+        return True
+    return bool(_poly._RELATED) and _poly.has_relation(rf.gens())
 
 
 def symbol(label, assumptions=None):

@@ -31,6 +31,7 @@ from ._engine import (
     engine_module,
     is_sage_available,
     is_sympy_available,
+    sage_module_if_available,
 )
 
 # types
@@ -578,6 +579,16 @@ def _disposable_symbol(name):
 
 def _disposable_symbols(prefix, count, start=0):
     return [_disposable_symbol(f"{prefix}{idx}") for idx in range(start, start + count)]
+
+
+def forget_symbol_assumptions(symbols):
+    sage = sage_module_if_available()
+    if sage is None:
+        return
+    for sym in symbols:
+        if isinstance(sym, sage.Expression) and sym.is_symbol():
+            for fact in sage.assumptions(sym):
+                sage.forget(fact)
 
 
 def one():

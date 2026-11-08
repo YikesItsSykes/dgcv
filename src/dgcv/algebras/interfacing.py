@@ -40,10 +40,9 @@ def structure_equations(
 
     if abbreviate_for_skew_struct is None:
         abbreviate_for_skew_struct = True if target_alg.is_Lie_algebra() else False
+    skew = bool(target_alg.is_skew_symmetric()) if abbreviate_for_skew_struct else False
     for i in range(target_alg.dimension):
-        start = (
-            i + 1 if abbreviate_for_skew_struct and target_alg.is_skew_symmetric else 0
-        )
+        start = i + 1 if skew else 0
         for j in range(start, target_alg.dimension):
             val = sum(
                 c * atoms[idx]

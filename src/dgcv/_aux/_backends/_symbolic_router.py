@@ -27,7 +27,11 @@ import math
 import numbers
 from fractions import Fraction
 
-from .._utilities._config import dgcv_warning, get_variable_registry
+from .._utilities._config import (
+    dgcv_warning,
+    get_dgcv_settings_registry,
+    get_variable_registry,
+)
 from ._engine import engine_capability, engine_kind, engine_module
 from ._types_and_constants import (
     as_fraction,
@@ -261,9 +265,38 @@ def get_free_symbols(expr):
     return set()
 
 
+def _check_constraint_rules(rules):
+    if isinstance(rules, dict):
+        return
+    if isinstance(rules, (list, tuple)) and all(
+        isinstance(j, tuple) and len(j) == 2 for j in rules
+    ):
+        return
+    raise TypeError(
+        "`constraints` takes a dict of rules or a list of (key, value) pairs, "
+        "like subs(); a coframe or its structure equations is not a rule set."
+    )
+
+
 def simplify(expr, method=None, try_hard=False, reflect_conjugation=False, **kwargs):
+    constraints = kwargs.pop("constraints", None)
+    with_conjugates = kwargs.pop("with_conjugates", True)
     expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_simplify__", None)
+    if constraints is not None:
+        _check_constraint_rules(constraints)
+        if callable(f):
+            if reflect_conjugation:
+                kwargs = dict(kwargs, reflect_conjugation=True)
+            if try_hard:
+                kwargs = dict(kwargs, try_hard=True)
+            return f(
+                method=method,
+                constraints=constraints,
+                with_conjugates=with_conjugates,
+                **kwargs,
+            )
+        expr = subs(expr, dict(constraints))
     if callable(f):
         try:
             if reflect_conjugation:
@@ -351,12 +384,72 @@ def _conjugation_swaps(expr):
     return swaps
 
 
+def _is_real_symbol(a):
+    if engine_kind() == "sympy":
+        return getattr(a, "is_extended_real", None) is True
+    f = getattr(a, "is_real", None)
+    if not callable(f):
+        return False
+    try:
+        return bool(f())
+    except Exception:
+        return False
+
+
+def _partner_symbol(a, name):
+    if engine_kind() == "sympy":
+        return engine_module().Symbol(name, **getattr(a, "_assumptions_orig", {}))
+    from ._types_and_constants import _disposable_symbol
+
+    return _disposable_symbol(name)
+
+
+def _standard_conjugate_swaps(expr, swaps):
+    registry = get_dgcv_settings_registry()
+    if registry.get("_conjugate_standard_symbols", True) is False:
+        return {}
+    pref = registry.get("conjugation_prefix", "BAR")
+    out = {}
+    for a in get_free_symbols(expr):
+        if a in swaps or _is_real_symbol(a):
+            continue
+        name = str(a)
+        if name.startswith(pref) and len(name) > len(pref):
+            target = name[len(pref) :]
+        else:
+            target = f"{pref}{name}"
+        out[a] = _partner_symbol(a, target)
+    return out
+
+
+def _sage_formal_conjugate(expr, names):
+    op = expr.operator()
+    if op is None:
+        if expr.is_symbol():
+            return names.get(str(expr), expr)
+        f = getattr(expr, "conjugate", None)
+        if not callable(f):
+            return expr
+        try:
+            return f()
+        except Exception:
+            return expr
+    return op(*[_sage_formal_conjugate(arg, names) for arg in expr.operands()])
+
+
 def _symbolic_conjugate(expr):
     if engine_kind() == "builtin":
         return conjugate(expr)
     swaps = _conjugation_swaps(expr)
+    swaps.update(_standard_conjugate_swaps(expr, swaps))
 
     if engine_kind() == "sage":
+        if callable(getattr(expr, "operator", None)) and callable(
+            getattr(expr, "operands", None)
+        ):
+            return _sage_formal_conjugate(
+                expr, {str(a): image for a, image in swaps.items()}
+            )
         f = getattr(expr, "conjugate", None)
         if not callable(f):
             return expr
@@ -378,7 +471,7 @@ def _symbolic_conjugate(expr):
     return subs(expr, {**swaps, imag: -imag}, simultaneous=True)
 
 
-def conjugate(expr, symbolic=False):
+def _engine_conjugate(expr, symbolic=False):
     expr = to_active_engine(expr)
     f = getattr(expr, "__dgcv_conjugate__", None)
     if callable(f):
@@ -413,6 +506,50 @@ def conjugate(expr, symbolic=False):
     if f is not None:
         return f()
     return expr
+
+
+def _registered_conjugates(out):
+    kind = engine_kind()
+    if kind == "sympy":
+        atoms = getattr(out, "atoms", None)
+        if atoms is None:
+            return out
+        heads = atoms(engine_module().conjugate)
+        if not heads:
+            return out
+        cd = get_variable_registry()["conversion_dictionaries"]["conjugation"]
+        undo = {}
+        for h in heads:
+            image = cd.get(str(h.args[0]))
+            if image is not None:
+                undo[h] = image
+        return out.xreplace(undo) if undo else out
+    if kind == "sage":
+        cd = get_variable_registry()["conversion_dictionaries"]["conjugation"]
+        undo = {}
+        for a in get_free_symbols(out):
+            image = cd.get(str(a))
+            if image is None:
+                continue
+            g = getattr(a, "conjugate", None)
+            if not callable(g):
+                continue
+            ca = g()
+            if str(ca) == str(a):
+                continue
+            undo[ca] = image
+        return subs(out, undo) if undo else out
+    return out
+
+
+def conjugate(expr, symbolic=False):
+    expr = to_active_engine(expr)
+    if symbolic is True or callable(getattr(expr, "__dgcv_conjugate__", None)):
+        return _engine_conjugate(expr, symbolic=symbolic)
+    out = _engine_conjugate(expr)
+    if get_dgcv_settings_registry().get("_conjugate_registered_variables", True) is False:
+        return out
+    return _registered_conjugates(out)
 
 
 def ratio(x, y=1):

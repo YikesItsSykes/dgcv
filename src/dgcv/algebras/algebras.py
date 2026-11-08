@@ -170,10 +170,7 @@ class algebra_class(_algebra_methods, dgcv_class):
 
     def __str__(self, VLP=None):
         if not self._registered:
-            if (
-                self._exclude_from_VMF == retrieve_passkey()
-                or get_dgcv_settings_registry()["forgo_warnings"] is True
-            ):
+            if self._exclude_from_VMF == retrieve_passkey():
                 pass
             elif self._callLock == retrieve_passkey() and isinstance(
                 self._print_warning, str
@@ -208,10 +205,7 @@ class algebra_class(_algebra_methods, dgcv_class):
 
     def _repr_latex_(self, verbose=False, abbrev=False, raw=False, **kwargs):
         if not self._registered:
-            if (
-                self._exclude_from_VMF == retrieve_passkey()
-                or get_dgcv_settings_registry()["forgo_warnings"] is True
-            ):
+            if self._exclude_from_VMF == retrieve_passkey():
                 pass
             elif self._callLock == retrieve_passkey() and isinstance(
                 self._print_warning, str

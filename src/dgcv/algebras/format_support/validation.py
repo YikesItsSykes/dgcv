@@ -8,7 +8,7 @@ from ..._aux._backends._symbolic_router import (
 from ..._aux._backends._types_and_constants import is_atomic
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._vmf._safeguards import get_dgcv_category, query_dgcv_categories
-from ...core.arrays import array_dgcv, freeze_matrix, matrix_dgcv
+from ...core.arrays import matrix_dgcv
 from ..linear_algebra import _structure_array
 from .dense_lists import aDataFromNestedLists
 from .matrices import algebraDataFromMatRep
@@ -94,17 +94,15 @@ def _validate_structure_data(
                         "The algebra_class initializer recieved data in an unsupported format."
                     )
         else:
-            return array_dgcv(
-                dict(),
-                shape=(0, 0),
-                null_return=freeze_matrix(matrix_dgcv.zeros(0, 1)),
-            ), set()
+            return _structure_array(dict(), 0 if dimension is None else dimension), set()
 
     if get_dgcv_category(data) == "array":
         return _structure_data_from_array(data, assume_skew=assume_skew)
 
     try:
         if isinstance(data, dict):
+            if not data:
+                return _structure_array(dict(), 0 if dimension is None else dimension), set()
             if all(
                 isinstance(key, numbers.Integral)
                 and all(query_dgcv_categories(obj, {"vector_field"}) for obj in val)

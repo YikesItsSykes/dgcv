@@ -177,7 +177,7 @@ def _fresh_variable_registry():
         "complex_variable_systems": {},
         "finite_algebra_systems": {},
         "misc": {},
-        "eds": {"atoms": {}, "coframes": {}},
+        "eds": {"atoms": {}, "coframes": {}, "frames": {}, "jet_spaces": {}},
         "protected_variables": set(),
         "temporary_variables": set(),
         "obscure_variables": set(),
@@ -323,6 +323,10 @@ dgcv_settings_registry = {
     "parallel_threads": None,
     "basis_minting": "auto",
     "_solve_default": "auto",
+    "_curate_solve_format": True,
+    "_creator_label_collision_check": True,
+    "_conjugate_registered_variables": True,
+    "_conjugate_standard_symbols": True,
     "_exceptional_cartan_basis": "coweights",
     "__": dict(),
 }
@@ -696,11 +700,7 @@ def configure_convenient_labels(
     if not configured_by_library:
         return
 
-    to_print = (
-        True if not dgcv_settings_registry.get("forgo_warnings", False) else verbose
-    )
-
-    if not to_print:
+    if not verbose:
         return
 
     engine = dgcv_settings_registry.get("default_symbolic_engine", "builtin")
@@ -711,7 +711,7 @@ def configure_convenient_labels(
     )
 
     message = f"The following labels were configured in the namespace:\n\n{bullets}"
-    if not dgcv_settings_registry.get("forgo_warnings", False):
+    if engine != "builtin" and not dgcv_settings_registry.get("forgo_warnings", False):
         message += (
             "\n\n"
             f"User warning: The current dgcv settings have {engine} registered as the default symbolic engine.\n"
@@ -732,6 +732,7 @@ def configure_warnings():
     warnings.simplefilter("once", category=dgcvWarning)
     warnings.simplefilter("once", category=dgcvDeprecationWarning)
     warnings.simplefilter("always", category=dgcvOperationsNote)
+    warnings.simplefilter("always", category=dgcvImportantWarning)
     warnings.showwarning = _dgcv_showwarning
 
 
@@ -739,6 +740,10 @@ _original_showwarning = warnings.showwarning
 
 
 class dgcvWarning(UserWarning):
+    pass
+
+
+class dgcvImportantWarning(UserWarning):
     pass
 
 
@@ -789,7 +794,7 @@ def _dgcv_showwarning(message, category, filename, lineno, file=None, line=None)
 
         print(f"dgcv deprecation: {message}{suffix}", file=stream)
         return
-    if issubclass(category, dgcvWarning):
+    if issubclass(category, (dgcvWarning, dgcvImportantWarning)):
         print(f"dgcv warning: {message}", file=stream)
         return
     if issubclass(category, dgcvOperationsNote):
@@ -809,12 +814,20 @@ def dgcv_warning(
         if isinstance(wc_label, str):
             if wc_label == "dgcvOperationsNote":
                 warning_class = dgcvOperationsNote
+            elif wc_label == "dgcvImportantWarning":
+                warning_class = dgcvImportantWarning
             elif wc_label == "debug_log":
                 warning_class = debug_log
             else:
                 warning_class = dgcvWarning
         else:
             warning_class = dgcvWarning
+
+    category = warning_class if isinstance(warning_class, type) else type(warning_class)
+    if issubclass(category, dgcvWarning) and get_dgcv_settings_registry().get(
+        "forgo_warnings", False
+    ):
+        return
 
     if isinstance(warning_class, type) and issubclass(warning_class, Warning):
         warning = (

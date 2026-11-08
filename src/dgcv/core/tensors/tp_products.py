@@ -1,17 +1,13 @@
-from ..._aux._backends._types_and_constants import expr_numeric_types
 from ..._aux._vmf._safeguards import get_dgcv_category
+from ._protocol import _as_tp, _is_scalar
 from .shapes import _infer_shape
 
 
 class _tp_products:
     def tp(self, other, impose_shape=None, _guard_shape=True):
         """Tensor product with another tensorProduct."""
-        if get_dgcv_category(other) in {
-            "subalgebra_element",
-            "algebra_element",
-        }:
-            other = other._convert_to_tp()
-        if isinstance(other, expr_numeric_types()):
+        other = _as_tp(other)
+        if _is_scalar(other):
             return other * self
         if not isinstance(other, tensorProduct):
             raise ValueError(
@@ -45,12 +41,10 @@ class _tp_products:
 
     def __rmatmul__(self, other):
         """Overload @ operator for tensor product."""
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             return tensorProduct({tuple(): other}).__matmul__(self)
-        elif get_dgcv_category(other) == "tensorProduct":
+        if get_dgcv_category(other) == "tensorProduct":
             return other.__matmul__(self)
-        elif get_dgcv_category(other) in {
-            "algebra_element",
-            "subalgebra_element",
-        }:
-            return other._convert_to_tp().__matmul__(self)
+        converted = _as_tp(other)
+        if converted is not other:
+            return converted.__matmul__(self)

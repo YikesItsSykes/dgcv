@@ -40,8 +40,12 @@ from .._aux._backends._types_and_constants import (
     op_expr,
     to_active_engine,
 )
-from .._aux._utilities._config import dgcv_warning
-from .._aux._vmf._safeguards import retrieve_passkey
+from .._aux._utilities._config import dgcv_warning, get_variable_registry
+from .._aux._vmf._safeguards import (
+    get_dgcv_category,
+    query_dgcv_categories,
+    retrieve_passkey,
+)
 from .._aux.printing.printing._eds import (
     bar_label_latex,
     conjugation_prefix,
@@ -51,6 +55,7 @@ from .._aux.printing.printing._eds import (
 )
 from ..core.base import dgcv_class
 from ..core.combinatorics.combinatorics import weightedPermSign
+from ..core.tensors import tensorProduct
 from ._atoms import (
     SortableObj,
     _custom_conj,
@@ -74,7 +79,7 @@ class _coefficient_mapped:
         return self._map_coefficients(lambda coeff: func(coeff, **kwargs))
 
     def simplify(self, **kwargs):
-        return self._induce_method_from_descending("simplify", **kwargs)
+        return self._eval_simplify(**kwargs)
 
     def factor(self, **kwargs):
         return self._induce_method_from_descending("factor", **kwargs)
@@ -122,12 +127,69 @@ class _coefficient_mapped:
         return self._induce_method_from_descending("denom", **kwargs)
 
 
+def _check_wedge_forms(forms):
+    for form in forms:
+        if not isinstance(form, abstract_differential_form_atom) or form.degree == 0:
+            raise TypeError(
+                "`coefficient` expects basis form atoms of positive degree as its arguments"
+            )
+        if form.label is not None and not _scalar_is_one(form.coeff):
+            raise ValueError(
+                f"`coefficient` expects unit basis forms; received the scaled form {form}"
+            )
+
+
+def _check_modulo_forms(forms):
+    for form in forms:
+        if (
+            not isinstance(form, abstract_differential_form_atom)
+            or form.degree != 1
+            or not _scalar_is_one(form.coeff)
+            or form.primary_coframe is None
+        ):
+            raise TypeError(f"`modulo` expects unit 1-forms of a coframe; received {form!r}")
+
+
+def _wedge_coefficient(forms, tail, scalar):
+    if len(forms) != len(tail) or len(set(forms)) != len(forms):
+        return 0
+    places = []
+    for form in forms:
+        for place, factor in enumerate(tail):
+            if factor == form:
+                places.append(place)
+                break
+        else:
+            return 0
+    sign = weightedPermSign(
+        [SortableObj((form, place)) for form, place in zip(forms, places)],
+        list(forms),
+        use_degree_attribute=True,
+    )
+    return scalar if sign == 1 else -scalar
+
+
+def _bare_scalar(value):
+    if not isinstance(value, zero_form_class):
+        return value
+    base = value._base
+    if base is None:
+        symbols = value.free_symbols
+        if len(symbols) == 1:
+            atom = next(iter(symbols))
+            if isinstance(atom, zero_form_atom) and value == atom:
+                return atom
+        return value
+    return base if isinstance(base, zero_form_atom) else value
+
+
 class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
     _dgcv_class_check = retrieve_passkey()
     _dgcv_category = "abstDFAtom"
     _dgcv_categories = {"abstDFAtom", "eds_form"}
 
     def __dgcv_solve_bridge__(self, bridge):
+        bridge.note_eds_forms()
         return bridge.lower(self._coeff)
 
     @property
@@ -150,12 +212,80 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
         self._coeff = coeff
         self.ext_deriv_order = ext_deriv_order
         self._markers = _markers
+        self._hash = None
 
         self.coeffs = [coeff]
 
     @property
     def is_zero(self):
-        return _scalar_is_zero(self._coeff)
+        return _scalar_is_zero(self._coeff) or self._is_formal_zero()
+
+    def _is_formal_zero(self):
+        if self.label is not None or not self.ext_deriv_order:
+            return False
+        coeff = self._coeff
+        if isinstance(coeff, (zero_form_atom, zero_form_class)):
+            return not coeff.free_symbols
+        return not get_free_symbols(as_engine_scalar(coeff))
+
+    @property
+    def primary_coframe(self):
+        if self.ext_deriv_order or not isinstance(self.label, str):
+            return None
+        for marker in self._markers:
+            if not isinstance(marker, str):
+                return marker if self in marker.forms else None
+        registry = get_variable_registry()
+        info = registry["paths"].get(self.label)
+        if info is None:
+            return None
+        kind = info.get("kind")
+        if kind not in (
+            "differential_form",
+            "differential_form_conjugate",
+            "zero_form",
+            "zero_form_conjugate",
+        ):
+            return None
+        system = registry["eds"]["atoms"].get(info["path"][1])
+        coframe = None if system is None else system.get("primary_coframe")
+        if coframe is None:
+            return None
+        if kind.startswith("differential_form") and self not in coframe.forms:
+            return None
+        return coframe
+
+    def _coframe_slot(self, name):
+        coframe = self.primary_coframe
+        if coframe is None:
+            return None
+        items = getattr(coframe, name, None)
+        if items is None:
+            return None
+        return items[coframe.forms.index(self)]
+
+    @property
+    def dual_vector_field(self):
+        return self._coframe_slot("dual_frame_in_coordinates")
+
+    @property
+    def form_in_coordinates(self):
+        return self._coframe_slot("forms_in_coordinates")
+
+    @property
+    def parameters(self):
+        coframe = self.primary_coframe
+        return frozenset() if coframe is None else coframe.parameters
+
+    @property
+    def source_form(self):
+        if not self.ext_deriv_order:
+            return self
+        if self.label is None:
+            return abstract_differential_form_atom(self.coeff, 0, _markers=self._markers)
+        return abstract_differential_form_atom(
+            1, self.degree - self.ext_deriv_order, self.label, 0, self._markers
+        )
 
     def _sage_(self):
         raise AttributeError
@@ -177,9 +307,51 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
         """
         Hash the abstract_DF_atom instance based on its attributes.
         """
-        return hash((self.coeff, self.degree, self.label, self.ext_deriv_order))
+        h = self._hash
+        if h is None:
+            h = hash((self.coeff, self.degree, self.label, self.ext_deriv_order))
+            self._hash = h
+        return h
+
+    def __reduce__(self):
+        coeff = self.coeff
+        carried = not isinstance(coeff, (zero_form_class, zero_form_atom))
+        state = {key: value for key, value in self.__dict__.items() if key != "_hash"}
+        return (
+            abstract_differential_form_atom._from_pickle,
+            (coeff if carried else None, carried, self.degree, self.label, self.ext_deriv_order),
+            state,
+        )
+
+    @classmethod
+    def _from_pickle(cls, coeff, carried, degree, label, ext_deriv_order):
+        obj = object.__new__(cls)
+        obj._hash = hash((coeff, degree, label, ext_deriv_order)) if carried else None
+        return obj
+
+    def _paired_form(self):
+        if self.ext_deriv_order or not isinstance(self.label, str):
+            return None
+        coframe = next((m for m in self._markers if not isinstance(m, str)), None)
+        if coframe is None:
+            return None
+        rules = coframe.conj_rules
+        for index, form in enumerate(coframe.forms):
+            if form.label == self.label:
+                target = rules.get(index, index)
+                return None if target == index else coframe.forms[target]
+        return None
 
     def _eval_conjugate(self):
+        partner = self._paired_form()
+        if partner is not None:
+            return abstract_differential_form_atom(
+                _custom_conj(self.coeff),
+                self.degree,
+                label=partner.label,
+                ext_deriv_order=self.ext_deriv_order,
+                _markers=partner._markers,
+            )
         if self.label:
             pref = conjugation_prefix()
             prefL = len(pref)
@@ -212,23 +384,19 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
     def __repr__(self):
         """String representation for abstract_DF_atom."""
 
+        if self._is_formal_zero():
+            return "0"
         if isinstance(self.coeff, (zero_form_atom, zero_form_class)):
             coeff_str = _zf_coeff_str(self.coeff, self.coeff.__repr__())
             return ext_der_repr(
-                f"{coeff_str}{self.label}" if self.label else coeff_str,
+                f"{coeff_str}*{self.label}" if self.label else coeff_str,
                 self.ext_deriv_order,
             )
         coeff_sympy = as_engine_scalar(self.coeff)
-        if (
-            not get_free_symbols(coeff_sympy)
-            and self.ext_deriv_order is not None
-            and self.ext_deriv_order > 0
-        ):
-            return "0"
         if _scalar_is_one(coeff_sympy):
-            return str(self.label) if self.label else "1"
+            return ext_der_repr(str(self.label), self.ext_deriv_order) if self.label else "1"
         elif _scalar_is_minus_one(coeff_sympy):
-            return f"-{self.label}" if self.label else "-1"
+            return ext_der_repr(f"-{self.label}", self.ext_deriv_order) if self.label else "-1"
         else:
             # Wrap in parentheses if there are multiple terms
             coeff_str = (
@@ -237,7 +405,7 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
                 else str(coeff_sympy)
             )
             return (
-                ext_der_repr(f"{coeff_str}{self.label}", self.ext_deriv_order)
+                ext_der_repr(f"{coeff_str}*{self.label}", self.ext_deriv_order)
                 if self.label
                 else ext_der_repr(coeff_str, self.ext_deriv_order)
             )
@@ -245,6 +413,8 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
     def _latex(self, printer=None, raw=True, **kwargs):
         """LaTeX representation for abstract_DF_atom."""
 
+        if self._is_formal_zero():
+            return "0"
         if isinstance(self.coeff, (zero_form_atom, zero_form_class)):
             coeff_latex = _routed_latex(self.coeff)
             return ext_der_latex(
@@ -254,16 +424,18 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
                 self.ext_deriv_order,
             )
         coeff_sympy = as_engine_scalar(self.coeff)
-        if (
-            not get_free_symbols(coeff_sympy)
-            and self.ext_deriv_order is not None
-            and self.ext_deriv_order > 0
-        ):
-            return "0"
         if _scalar_is_one(coeff_sympy):
-            return bar_label_latex(self.label) if self.label else "1"
+            return (
+                ext_der_latex(bar_label_latex(self.label), self.ext_deriv_order)
+                if self.label
+                else "1"
+            )
         elif _scalar_is_minus_one(coeff_sympy):
-            return f"-{bar_label_latex(self.label)}" if self.label else "-1"
+            return (
+                ext_der_latex(f"-{bar_label_latex(self.label)}", self.ext_deriv_order)
+                if self.label
+                else "-1"
+            )
         else:
             # Wrap in parentheses if there are multiple terms
             coeff_latex = (
@@ -283,23 +455,19 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
         return self._latex() if raw else f"${self._latex()}$"
 
     def __str__(self):
+        if self._is_formal_zero():
+            return "0"
         if isinstance(self.coeff, (zero_form_atom, zero_form_class)):
             coeff_str = _zf_coeff_str(self.coeff, self.coeff.__repr__())
             return ext_der_str(
-                f"{coeff_str}{self.label}" if self.label else coeff_str,
+                f"{coeff_str}*{self.label}" if self.label else coeff_str,
                 self.ext_deriv_order,
             )
         coeff_sympy = as_engine_scalar(self.coeff)
-        if (
-            not get_free_symbols(coeff_sympy)
-            and self.ext_deriv_order is not None
-            and self.ext_deriv_order > 0
-        ):
-            return "0"
         if _scalar_is_one(coeff_sympy):
-            return str(self.label) if self.label else "1"
+            return ext_der_str(str(self.label), self.ext_deriv_order) if self.label else "1"
         elif _scalar_is_minus_one(coeff_sympy):
-            return f"-{self.label}" if self.label else "-1"
+            return ext_der_str(f"-{self.label}", self.ext_deriv_order) if self.label else "-1"
         else:
             # Wrap in parentheses if there are multiple terms
             coeff_str = (
@@ -308,7 +476,7 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
                 else str(coeff_sympy)
             )
             return (
-                ext_der_str(f"{coeff_str}{self.label}", self.ext_deriv_order)
+                ext_der_str(f"{coeff_str}*{self.label}", self.ext_deriv_order)
                 if self.label
                 else ext_der_str(coeff_str, self.ext_deriv_order)
             )
@@ -363,10 +531,15 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
         expand=False,
         **kwargs,
     ):
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kwargs)
         return abstract_differential_form_atom(
-            _routed_simplify(self.coeff),
+            _routed_simplify(self.coeff, **kwargs),
             self.degree,
             self.label,
+            ext_deriv_order=self.ext_deriv_order,
             _markers=self._markers,
         )
 
@@ -375,8 +548,14 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             new_coeff = self.coeff._eval_canonicalize(depth=depth)
         else:
             new_coeff = self.coeff
+        if new_coeff is self.coeff:
+            return self
         return abstract_differential_form_atom(
-            new_coeff, self.degree, self.label, _markers=self._markers
+            new_coeff,
+            self.degree,
+            self.label,
+            ext_deriv_order=self.ext_deriv_order,
+            _markers=self._markers,
         )
 
     def _map_coefficients(self, fn):
@@ -402,11 +581,13 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             _markers=self._markers,
         )
 
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
         # an alias for regular subs so that other functions can know the with_diff_corollaries keyword is available
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, subs_data, with_diff_corollaries=False):
+    def subs(self, subs_data, with_diff_corollaries=False, with_conjugates=None):
         if isinstance(subs_data, (list, tuple)) and all(
             isinstance(j, tuple) and len(j) == 2 for j in subs_data
         ):
@@ -416,12 +597,17 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
                 dgcv_warning(
                     "Provided substitution rules had repeat keys, and only one was used."
                 )
+        close = with_diff_corollaries if with_conjugates is None else with_conjugates
+        if close and isinstance(subs_data, dict):
+            subs_data = _conjugate_closure(subs_data, "subs")
         if self in subs_data:
             return subs_data[self]
         new_coeff = None
         if isinstance(self.coeff, (zero_form_atom, zero_form_class)):
             new_coeff = (self.coeff).subs(
-                subs_data, with_diff_corollaries=with_diff_corollaries
+                subs_data,
+                with_diff_corollaries=with_diff_corollaries,
+                with_conjugates=False,
             )
         elif isinstance(self.coeff, expr_types()):
             if not all(
@@ -458,9 +644,7 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
 
     @property
     def free_symbols(self):
-        if hasattr(self.coeff, "free_symbols"):
-            return self.coeff.free_symbols
-        return set()
+        return set(get_free_symbols(self.coeff))
 
     @property
     def _seperated_form(self):
@@ -476,6 +660,45 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             )
         return newAtom, self.coeff
 
+    def coefficient(self, *forms):
+        _check_wedge_forms(forms)
+        if self.is_zero:
+            return 0
+        if self.degree == 0:
+            return _bare_scalar(self.coeff) if not forms else 0
+        if self.label is None and self.ext_deriv_order:
+            unit, scalar = self, 1
+        else:
+            unit, scalar = self._seperated_form
+        return _bare_scalar(_wedge_coefficient(forms, (unit,), scalar))
+
+    def coefficients(self):
+        if self.is_zero:
+            return {}
+        if self.degree == 0:
+            return {(): _bare_scalar(self.coeff)}
+        if self.label is None and self.ext_deriv_order:
+            return {(self,): 1}
+        unit, scalar = self._seperated_form
+        return {(unit,): _bare_scalar(scalar)}
+
+    def modulo(self, *one_forms):
+        _check_modulo_forms(one_forms)
+        if self.degree == 0 or (self.label is None and self.ext_deriv_order):
+            return self
+        if self._seperated_form[0] in one_forms:
+            return abstract_differential_form([])
+        return self
+
+    def _convert_to_tp(self):
+        return _form_tp(self)
+
+    def __call__(self, *vectors):
+        return _evaluate_on_vectors(self, vectors)
+
+    def dual(self):
+        return _form_dual(self)
+
     def __mul__(self, other):
         """Handle left multiplication."""
         if isinstance(other, abstract_differential_form_atom):
@@ -488,7 +711,11 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             other, expr_numeric_types()
         ):
             return abstract_differential_form_atom(
-                self.coeff * other, self.degree, self.label, _markers=self._markers
+                self.coeff * other,
+                self.degree,
+                self.label,
+                ext_deriv_order=self.ext_deriv_order,
+                _markers=self._markers,
             )
         else:
             return NotImplemented
@@ -502,7 +729,11 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             other, expr_numeric_types()
         ):
             return abstract_differential_form_atom(
-                self.coeff * other, self.degree, self.label, _markers=self._markers
+                self.coeff * other,
+                self.degree,
+                self.label,
+                ext_deriv_order=self.ext_deriv_order,
+                _markers=self._markers,
             )
         else:
             return NotImplemented
@@ -565,10 +796,7 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             return abstract_differential_form(
                 (abstract_differential_form_monomial([self]),) + tuple(other.terms)
             )
-        else:
-            raise TypeError(
-                f"Unsupported operand type {type(other)} for + with `abstract_DF_atom`"
-            )
+        return NotImplemented
 
     def __sub__(self, other):
         """Subtraction with another atom or monomial returns an abstract_DF."""
@@ -576,19 +804,19 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
             return self
         if isinstance(other, expr_numeric_types()):
             other = zero_form_class(other)
-        elif isinstance(
+        if isinstance(
             other,
             (abstract_differential_form_monomial, abstract_differential_form_atom),
         ):
             return abstract_differential_form(
                 [abstract_differential_form_monomial([self]), -1 * other]
             )
-        elif isinstance(other, abstract_differential_form):
-            negated_terms = tuple([-1 * term for term in other.terms])
+        if isinstance(other, abstract_differential_form):
+            negated_terms = [-1 * term for term in other.terms]
             return abstract_differential_form(
-                [abstract_differential_form_monomial([self])] + list(negated_terms)
+                [abstract_differential_form_monomial([self])] + negated_terms
             )
-        elif isinstance(other, (zero_form_atom, zero_form_class)):
+        if isinstance(other, (zero_form_atom, zero_form_class)):
             return abstract_differential_form(
                 [
                     abstract_differential_form_monomial([self]),
@@ -597,10 +825,7 @@ class abstract_differential_form_atom(_coefficient_mapped, dgcv_class):
                     ),
                 ]
             )
-        else:
-            raise TypeError(
-                f"Unsupported operand type for - with `abstract_DF_atom`: {type(other)}"
-            )
+        return NotImplemented
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -633,6 +858,7 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
     _dgcv_categories = {"abstDFMonom", "eds_form"}
 
     def __dgcv_solve_bridge__(self, bridge):
+        bridge.note_eds_forms()
         return bridge.lower(self._coeff)
 
     @property
@@ -690,6 +916,12 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
         new_objs = []
 
         for j in objs_sorted:
+            if j.value.label is None and j.value.ext_deriv_order and j.value.degree:
+                if j.value.is_zero:
+                    coeffFactor = 0
+                else:
+                    new_objs.append(j.value)
+                continue
             if not _scalar_is_zero(coeffFactor):
                 coeffFactor = (
                     coeffFactor * j.value.coeff
@@ -697,15 +929,18 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
                     else 0
                 )
             if j.place[0] != 0:
-                new_objs.append(
-                    abstract_differential_form_atom(
-                        1,
-                        j.value.degree,
-                        j.value.label,
-                        j.value.ext_deriv_order,
-                        j.value._markers,
+                if _scalar_is_one(j.value.coeff):
+                    new_objs.append(j.value)
+                else:
+                    new_objs.append(
+                        abstract_differential_form_atom(
+                            1,
+                            j.value.degree,
+                            j.value.label,
+                            j.value.ext_deriv_order,
+                            j.value._markers,
+                        )
                     )
-                )
 
         consolidated_factor = abstract_differential_form_atom(
             coeffFactor, 0
@@ -733,6 +968,24 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
             for factor in self.factors
             if not _scalar_is_zero(factor.coeff)
         )
+
+    @classmethod
+    def _from_sorted(cls, coeff, tail):
+        if _scalar_is_zero(coeff):
+            return cls([abstract_differential_form_atom(0, 0)])
+        obj = object.__new__(cls)
+        factors = [abstract_differential_form_atom(coeff, 0)] + list(tail)
+        obj.factors_sorted = factors
+        obj._coeff = factors[0].coeff
+        obj.factors = factors
+        obj.str_ids = tuple(
+            "<Coeff>"
+            if i == 0 and factor.label is None
+            else (factor.label if factor.label is not None else "<None>")
+            for i, factor in enumerate(factors)
+        )
+        obj.degree = sum(factor.degree for factor in tail)
+        return obj
 
     def _sage_(self):
         raise AttributeError
@@ -786,6 +1039,38 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
     def coeffs(self):
         return [self.coeff]
 
+    def coefficient(self, *forms):
+        _check_wedge_forms(forms)
+        if self.is_zero:
+            return 0
+        return _bare_scalar(
+            _wedge_coefficient(
+                forms, self.factors_sorted[1:], self.factors_sorted[0].coeff
+            )
+        )
+
+    def coefficients(self):
+        if self.is_zero:
+            return {}
+        return {
+            tuple(self.factors_sorted[1:]): _bare_scalar(self.factors_sorted[0].coeff)
+        }
+
+    def modulo(self, *one_forms):
+        _check_modulo_forms(one_forms)
+        if any(factor in one_forms for factor in self.factors_sorted[1:]):
+            return abstract_differential_form([])
+        return self
+
+    def _convert_to_tp(self):
+        return _form_tp(self)
+
+    def __call__(self, *vectors):
+        return _evaluate_on_vectors(self, vectors)
+
+    def dual(self):
+        return _form_dual(self)
+
     def _eval_conjugate(self):
         return abstract_differential_form_monomial(
             [j._eval_conjugate() for j in self.factors]
@@ -801,8 +1086,12 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
         expand=False,
         **kwargs,
     ):
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kwargs)
         return abstract_differential_form_monomial(
-            [j._eval_simplify() for j in self.factors]
+            [j._eval_simplify(**kwargs) for j in self.factors]
         )
 
     def _eval_canonicalize(self, depth=1000):
@@ -811,16 +1100,28 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
                 return obj._eval_canonicalize(depth=depth)
             return obj
 
-        return abstract_differential_form_monomial([_canon(j) for j in self.factors])
+        new_factors = [_canon(j) for j in self.factors]
+        if all(new is old for new, old in zip(new_factors, self.factors)):
+            return self
+        return abstract_differential_form_monomial(new_factors)
 
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
         # an alias for regular subs so that other functions can know the with_diff_corollaries keyword is available
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, subs_data, with_diff_corollaries=False):
+    def subs(self, subs_data, with_diff_corollaries=False, with_conjugates=None):
+        close = with_diff_corollaries if with_conjugates is None else with_conjugates
+        if close and isinstance(subs_data, dict):
+            subs_data = _conjugate_closure(subs_data, "subs")
         return abstract_differential_form_monomial(
             [
-                j._subs_dgcv(subs_data, with_diff_corollaries=with_diff_corollaries)
+                j._subs_dgcv(
+                    subs_data,
+                    with_diff_corollaries=with_diff_corollaries,
+                    with_conjugates=False,
+                )
                 for j in self.factors_sorted
             ]
         )
@@ -981,10 +1282,7 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
             return abstract_differential_form_monomial(
                 [abstract_differential_form_atom(other, 0)] + self.factors_sorted
             )
-        else:
-            raise TypeError(
-                f"Unsupported operand type(s) for *: '{type(other).__name__}' and 'abstract_DF_monomial'"
-            )
+        return NotImplemented
 
     def __truediv__(self, other):
         if isinstance(other, abstract_differential_form_atom) and other.degree == 0:
@@ -1016,21 +1314,13 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
             (abstract_differential_form_monomial, abstract_differential_form_atom),
         ):
             return abstract_differential_form([self, other])
-        elif isinstance(other, abstract_differential_form):
+        if isinstance(other, abstract_differential_form):
             return abstract_differential_form((self,) + tuple(other.terms))
-        elif isinstance(other, (zero_form_class, zero_form_atom)):
+        if isinstance(other, (zero_form_class, zero_form_atom)):
             return abstract_differential_form(
                 [self, abstract_differential_form_atom(other, 0)]
             )
-        elif isinstance(other, expr_numeric_types()):
-            other_sympy = as_engine_scalar(other)
-            return abstract_differential_form(
-                [self, abstract_differential_form_atom(other_sympy, 0)]
-            )
-        else:
-            raise TypeError(
-                "Unsupported operand type for + with `abstract_DF_monomial`"
-            )
+        return NotImplemented
 
     def __sub__(self, other):
         """Subtraction with another monomial or atom returns an abstract_DF."""
@@ -1038,27 +1328,19 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
             return self
         if isinstance(other, expr_numeric_types()):
             other = zero_form_class(other)
-        elif isinstance(
+        if isinstance(
             other,
             (abstract_differential_form_monomial, abstract_differential_form_atom),
         ):
             return abstract_differential_form([self, -1 * other])
-        elif isinstance(other, abstract_differential_form):
-            negated_terms = tuple([-1 * term for term in other.terms])
+        if isinstance(other, abstract_differential_form):
+            negated_terms = [-1 * term for term in other.terms]
             return abstract_differential_form([self] + negated_terms)
-        elif isinstance(other, (zero_form_class, zero_form_atom)):
+        if isinstance(other, (zero_form_class, zero_form_atom)):
             return abstract_differential_form(
                 [self, abstract_differential_form_atom(-1 * other, 0)]
             )
-        elif isinstance(other, expr_numeric_types()):
-            other_sympy = -1 * as_engine_scalar(other)
-            return abstract_differential_form(
-                [self, abstract_differential_form_atom(other_sympy, 0)]
-            )
-        else:
-            raise TypeError(
-                "Unsupported operand type for - with `abstract_DF_monomial`"
-            )
+        return NotImplemented
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -1081,6 +1363,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
     _dgcv_categories = {"abstract_DF", "eds_form"}
 
     def __dgcv_solve_bridge__(self, bridge):
+        bridge.note_eds_forms()
         lowered = []
         for term in self.terms:
             lowered += bridge.lower(term)
@@ -1120,12 +1403,8 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
 
         # Process terms into abstract_DF_monomial instances
         processed_terms = [
-            process_abstDF(term) for term in terms if not process_abstDF(term).is_zero
+            term for term in map(process_abstDF, terms) if not term.is_zero
         ]
-        # Handle empty terms: default to trivial zero form
-        if not terms:
-            terms = [abstract_differential_form_atom(0, 0)]
-
         # Simplify terms by combining like terms and removing zeros
         collected_terms = tuple(self.simplify_terms(processed_terms))
         if len(collected_terms) == 0:
@@ -1140,6 +1419,8 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
             if all(j.degree == self.terms[0].degree for j in self.terms)
             else None
         )
+        self._hash = None
+        self._coefficient_key = None
 
     def _sage_(self):
         raise AttributeError
@@ -1178,9 +1459,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
 
         # Rebuild simplified terms list
         simplified_terms = [
-            abstract_differential_form_monomial(
-                [abstract_differential_form_atom(data["coeff"], 0)] + data["tail"]
-            )
+            abstract_differential_form_monomial._from_sorted(data["coeff"], data["tail"])
             for key, data in term_dict.items()
             if not _scalar_is_zero(data["coeff"])
         ]
@@ -1203,9 +1482,57 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
                 coeff_list += [term.factors_sorted[0]]
         return coeff_list
 
+    def coefficient(self, *forms):
+        _check_wedge_forms(forms)
+        total = 0
+        for term in self.terms:
+            if term.is_zero:
+                continue
+            found = _wedge_coefficient(
+                forms, term.factors_sorted[1:], term.factors_sorted[0].coeff
+            )
+            if not _scalar_is_zero(found):
+                total = found if _scalar_is_zero(total) else total + found
+        return _bare_scalar(total)
+
+    def coefficients(self):
+        out = {}
+        for term in self.terms:
+            if term.is_zero:
+                continue
+            key = tuple(term.factors_sorted[1:])
+            scalar = term.factors_sorted[0].coeff
+            out[key] = scalar if key not in out else out[key] + scalar
+        return {key: _bare_scalar(value) for key, value in out.items()}
+
+    def modulo(self, *one_forms):
+        _check_modulo_forms(one_forms)
+        kept = [
+            term
+            for term in self.terms
+            if not any(factor in one_forms for factor in term.factors_sorted[1:])
+        ]
+        return self if len(kept) == len(self.terms) else abstract_differential_form(kept)
+
+    def _convert_to_tp(self):
+        return _form_tp(self)
+
+    def __call__(self, *vectors):
+        return _evaluate_on_vectors(self, vectors)
+
+    def dual(self):
+        return _form_dual(self)
+
     @property
     def is_zero(self):
         return all(term.is_zero for term in self.terms)
+
+    def _comparison_key(self):
+        key = self._coefficient_key
+        if key is None:
+            key = self.coefficients()
+            self._coefficient_key = key
+        return key
 
     def __eq__(self, other):
         """
@@ -1213,13 +1540,25 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
         """
         if not isinstance(other, abstract_differential_form):
             return NotImplemented
-        return self.terms == other.terms and self.degree == other.degree
+        if self is other or (self.terms == other.terms and self.degree == other.degree):
+            return True
+        if self.degree != other.degree:
+            return False
+        mine, theirs = self._comparison_key(), other._comparison_key()
+        return mine.keys() == theirs.keys() and all(
+            scalars_equal(mine[key], theirs[key]) for key in mine
+        )
 
     def __hash__(self):
         """
-        Hash the abstract_DF instance based on its terms.
+        Hash the abstract_DF instance based on its coefficients.
         """
-        return hash((self.terms, self.degree))
+        h = self._hash
+        if h is None:
+            key = self._comparison_key()
+            h = hash((self.degree, tuple(sorted(hash((k, v)) for k, v in key.items()))))
+            self._hash = h
+        return h
 
     def sort_key(self, order=None):  # for the sympy sorting.py default_sort_key
         return (4, self.degree, self.terms)  # 4 is to group with function-like objects
@@ -1237,7 +1576,13 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
         expand=False,
         **kwargs,
     ):
-        return abstract_differential_form([j._eval_simplify() for j in self.terms])
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(self, constraints, with_conjugates, **kwargs)
+        return abstract_differential_form(
+            [j._eval_simplify(**kwargs) for j in self.terms]
+        )
 
     def _eval_canonicalize(self, depth=1000):
         def _canon(obj):
@@ -1247,14 +1592,23 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
 
         return abstract_differential_form([_canon(j) for j in self.terms])
 
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
         # an alias for regular subs so that other functions can know the with_diff_corollaries keyword is available
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, subs_data, with_diff_corollaries=False):
+    def subs(self, subs_data, with_diff_corollaries=False, with_conjugates=None):
+        close = with_diff_corollaries if with_conjugates is None else with_conjugates
+        if close and isinstance(subs_data, dict):
+            subs_data = _conjugate_closure(subs_data, "subs")
         return abstract_differential_form(
             [
-                j._subs_dgcv(subs_data, with_diff_corollaries=with_diff_corollaries)
+                j._subs_dgcv(
+                    subs_data,
+                    with_diff_corollaries=with_diff_corollaries,
+                    with_conjugates=False,
+                )
                 for j in self.terms
             ]
         )
@@ -1290,8 +1644,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
             (abstract_differential_form_monomial, abstract_differential_form_atom),
         ):
             return abstract_differential_form(self.terms + (other,))
-        else:
-            raise TypeError("Unsupported operand type for + with `abstract_DF`")
+        return NotImplemented
 
     def __sub__(self, other):
         if isinstance(other, expr_numeric_types()):
@@ -1310,8 +1663,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
             (abstract_differential_form_monomial, abstract_differential_form_atom),
         ):
             return self + (-1 * other)
-        else:
-            raise TypeError("Unsupported operand type for - with `abstract_DF`")
+        return NotImplemented
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -1336,8 +1688,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
         if isinstance(other, abstract_differential_form_monomial):
             # Multiply each term by the monomial
             return abstract_differential_form([term * other for term in self.terms])
-        else:
-            NotImplemented
+        return NotImplemented
 
     def __rmul__(self, other):
         if isinstance(other, (zero_form_class, zero_form_atom)):
@@ -1352,8 +1703,7 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
             other = abstract_differential_form([other])
         if isinstance(other, abstract_differential_form):
             return other.__mul__(self)
-        else:
-            NotImplemented
+        return NotImplemented
 
     def __neg__(self):
         return -1 * self
@@ -1407,6 +1757,189 @@ class abstract_differential_form(_coefficient_mapped, dgcv_class):
             if hasattr(term, "free_symbols"):
                 var_set |= term.free_symbols
         return var_set
+
+
+def _unit_frame(units):
+    coframes = set()
+    for unit in units:
+        coframe = unit.primary_coframe
+        if coframe is None:
+            raise TypeError(f"{unit} belongs to no coframe, so it has no dual frame")
+        coframes.add(coframe)
+    if len(coframes) > 1:
+        raise TypeError(
+            "the form mixes 1-forms of two coframes; a pairing with vector fields needs one coframe"
+        )
+    return next(iter(coframes)).dual() if coframes else None
+
+
+def _form_from_entries(frame, entries):
+    forms = frame.coframe.forms
+    terms = []
+    for key, value in entries.items():
+        if _scalar_is_zero(value):
+            continue
+        factors = [abstract_differential_form_atom(value, 0)]
+        factors.extend(forms[idx] for idx in key)
+        terms.append(abstract_differential_form_monomial(factors))
+    return abstract_differential_form(terms)
+
+
+def _form_tp(form):
+    entries = form.coefficients()
+    frame = _unit_frame([unit for key in entries for unit in key])
+    if frame is None:
+        return tensorProduct({(): entries.get((), 0)})
+    index = {unit: idx for idx, unit in enumerate(frame.coframe.forms)}
+    card = frame.card
+    return tensorProduct(
+        {
+            tuple((index[unit], 0, card) for unit in key): value
+            for key, value in entries.items()
+        },
+        shape="skew",
+    )
+
+
+def _form_dual(form):
+    if form.degree != 1:
+        raise TypeError("`dual` of a form is defined for 1-forms; higher degrees pair through `form(X, ...)`")
+    entries = form.coefficients()
+    frame = _unit_frame([unit for key in entries for unit in key])
+    if frame is None:
+        raise TypeError("the 1-form belongs to no coframe, so it has no dual vector field")
+    index = {unit: idx for idx, unit in enumerate(frame.coframe.forms)}
+    return frame.element({index[key[0]]: value for key, value in entries.items()})
+
+
+def _permutation_sign(order):
+    sign = 1
+    seen = [False] * len(order)
+    for start in range(len(order)):
+        if seen[start]:
+            continue
+        length = 0
+        pos = start
+        while not seen[pos]:
+            seen[pos] = True
+            pos = order[pos]
+            length += 1
+        if length % 2 == 0:
+            sign = -sign
+    return sign
+
+
+def _contract_first_slots(current, steps):
+    for step in steps:
+        by_index = isinstance(step, numbers.Integral)
+        nxt = {}
+        for key, c in current.items():
+            for pos, idx in enumerate(key):
+                if by_index:
+                    if idx != step:
+                        continue
+                    term = c
+                else:
+                    xi = step.get(idx)
+                    if xi is None:
+                        continue
+                    term = c * xi
+                if pos % 2:
+                    term = -term
+                tail = key[:pos] + key[pos + 1 :]
+                nxt[tail] = nxt[tail] + term if tail in nxt else term
+        current = nxt
+    return current
+
+
+def _multivector_frame(tensor):
+    frames = set()
+    for key in tensor.coeff_dict:
+        for idx, valence, card in key:
+            if valence != 1:
+                raise TypeError("a form evaluates on multivectors, not on tensors with covariant factors")
+            space = getattr(card, "space", None)
+            if not query_dgcv_categories(space, "eds_frame"):
+                raise TypeError("a form evaluates on multivectors over an abstract frame")
+            frames.add(space)
+    if len(frames) != 1:
+        raise TypeError("the multivector mixes frames")
+    return frames.pop()
+
+
+def _evaluate_on_multivector(form, tensor):
+    if tensor.shape not in ("skew", "all", "general"):
+        raise TypeError("a form evaluates on skew or general tensors of vectors, not on a symmetric tensor")
+    if tensor.min_degree != tensor.max_degree:
+        raise TypeError("a multivector of mixed degree cannot be evaluated")
+    frame = _multivector_frame(tensor)
+    if tensor.max_degree == 1:
+        return _evaluate_on_vectors(form, (frame.element(tensor),))
+    if form.is_zero:
+        return 0
+    degree = form.degree
+    if degree is None:
+        raise TypeError("a form of mixed degree cannot be evaluated on multivectors")
+    p = tensor.max_degree
+    if degree == 0 or p == 0:
+        return 0
+    if p > degree:
+        raise TypeError(f"a {degree}-form takes a multivector of degree at most {degree}; received {p}")
+    entries = form.coefficients()
+    if _unit_frame([unit for key in entries for unit in key]) is not frame:
+        raise TypeError("the multivector belongs to another frame than the form's coframe")
+    index = {unit: idx for idx, unit in enumerate(frame.coframe.forms)}
+    current = {tuple(index[unit] for unit in key): value for key, value in entries.items()}
+    total = {}
+    for key, weight in tensor.coeff_dict.items():
+        if _scalar_is_zero(weight):
+            continue
+        partial = _contract_first_slots(current, tuple(factor[0] for factor in key))
+        for tail, value in partial.items():
+            term = weight * value
+            total[tail] = total[tail] + term if tail in total else term
+    if p == degree:
+        return total.get((), 0)
+    return _form_from_entries(frame, total)
+
+
+def _evaluate_on_vectors(form, vectors):
+    if not vectors:
+        return form
+    if len(vectors) == 1 and get_dgcv_category(vectors[0]) == "tensorProduct":
+        return _evaluate_on_multivector(form, vectors[0])
+    frames = set()
+    for vector in vectors:
+        if not query_dgcv_categories(vector, "eds_vector"):
+            raise TypeError(
+                f"a form evaluates on abstract vector fields, not {type(vector).__name__}"
+            )
+        frames.add(vector.frame)
+    if len(frames) != 1:
+        raise TypeError("the vector fields belong to different frames")
+    frame = frames.pop()
+    if form.is_zero:
+        return 0
+    degree = form.degree
+    if degree is None:
+        raise TypeError("a form of mixed degree cannot be evaluated on vector fields")
+    if len(vectors) > degree:
+        raise TypeError(
+            f"a {degree}-form takes at most {degree} vector field arguments; received {len(vectors)}"
+        )
+    if degree == 0:
+        return 0
+    entries = form.coefficients()
+    if _unit_frame([unit for key in entries for unit in key]) is not frame:
+        raise TypeError("the vector fields belong to another frame than the form's coframe")
+    index = {unit: idx for idx, unit in enumerate(frame.coframe.forms)}
+    current = {
+        tuple(index[unit] for unit in key): value for key, value in entries.items()
+    }
+    current = _contract_first_slots(current, [vector.coeff_dict for vector in vectors])
+    if len(vectors) == degree:
+        return current.get((), 0)
+    return _form_from_entries(frame, current)
 
 
 # old dgcv version support stuff

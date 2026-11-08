@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any, List, Sequence
 
 from ..._aux._backends._symbolic_router import get_free_symbols
-from ..._aux._vmf.vmf import vmf_lookup
+from .cartan import _prep_symb_set_for_ext_der
+from .retrieval import coordinate_differential_form, coordinate_vector_field
 
 
 def _coordinate_basis_from_vmf(
@@ -11,41 +12,38 @@ def _coordinate_basis_from_vmf(
     *,
     coorType: str,  # "df" or "vf"
 ) -> List[Any]:
+    getter = coordinate_vector_field if coorType == "vf" else coordinate_differential_form
     out: List[Any] = []
     for coordinate in coordinate_space:
-        info = vmf_lookup(coordinate, differential_system=True)
-        ds = info.get("differential_system")
-        if not isinstance(ds, dict):
-            raise TypeError(
-                "`coordinate_space` must consist of VMF-registered coordinates with a differential system."
-            )
-        obj = ds.get(coorType)
+        obj = getter(coordinate)
         if obj is None:
             raise TypeError(
-                "`coordinate_space` must consist of VMF-registered coordinates with a differential system."
+                "`coordinate_space` must consist of coordinates registered in the dgcv VMF with a differential system, or of unregistered symbols. "
+                "Suggestion: initialize coordinates with `createVariables(..., withVF=True)` (or `createVariables(..., complex=True)` as appropriate)."
             )
         out.append(obj)
     return out
 
 
-def _infer_coordinate_space_from_objs(objs: Sequence[Any]) -> List[Any]:
-    syms: set[Any] = set()
-    for o in objs:
-        fs = get_free_symbols(o)
-        if fs:
-            params = getattr(o, "parameters", None)
+def _format_preference(objs: Sequence[Any]):
+    formats = {getattr(obj, "_validated_format", None) for obj in objs}
+    if formats <= {"complex"}:
+        return "complex"
+    if formats <= {"real"}:
+        return "real"
+    return None
+
+
+def _infer_coordinate_space_from_objs(objs: Sequence[Any], parameters=()) -> List[Any]:
+    symbols: set[Any] = set()
+    for obj in objs:
+        free = get_free_symbols(obj)
+        if free:
+            params = getattr(obj, "parameters", None)
             if params:
-                fs = set(fs) - set(params)
-            syms |= set(fs)
-
-    coordinates: List[Any] = []
-    for a in syms:
-        info = vmf_lookup(a, differential_system=True)
-        ds = info.get("differential_system")
-        if isinstance(ds, dict) and (
-            ds.get("vf") is not None or ds.get("df") is not None
-        ):
-            coordinates.append(a)
-
-    coordinates.sort(key=lambda x: str(x))
-    return coordinates
+                free = set(free) - set(params)
+            symbols |= set(free)
+    symbols -= set(parameters)
+    registry = _prep_symb_set_for_ext_der(symbols, prefer=_format_preference(objs))
+    coordinates = [atom for system in registry.values() for atom in system]
+    return sorted(coordinates, key=str)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numbers
 from typing import Any, Dict, Sequence
 
 from ..._aux._backends._symbolic_router import get_free_symbols
@@ -108,7 +109,9 @@ def _prep_symb_set_for_ext_der(
     return registry
 
 
-def exteriorDerivative(form_or_scalar: Any, **kwargs) -> "differential_form_class":
+def exteriorDerivative(
+    form_or_scalar: Any, parameters=None, **kwargs
+) -> "differential_form_class":
     obj = form_or_scalar
 
     if get_dgcv_category(obj) != "tensor_field":
@@ -128,9 +131,11 @@ def exteriorDerivative(form_or_scalar: Any, **kwargs) -> "differential_form_clas
 
     exprVars = get_free_symbols(form)
     if exprVars:
-        params = getattr(form, "parameters", None)
+        params = set(getattr(form, "parameters", None) or ())
+        if parameters:
+            params |= set(parameters)
         if params:
-            exprVars = set(exprVars) - set(params)
+            exprVars = set(exprVars) - params
     else:
         exprVars = set()
 
@@ -165,6 +170,12 @@ def interiorProduct(
     vector_field: "vector_field_class",
     differential_form: "differential_form_class",
 ) -> "differential_form_class":
+    if query_dgcv_categories(vector_field, {"eds_vector"}) or get_dgcv_category(vector_field) == "tensorProduct":
+        if not query_dgcv_categories(differential_form, {"eds_form"}):
+            raise TypeError(
+                "interiorProduct of an abstract vector field or multivector takes an abstract differential form"
+            )
+        return differential_form(vector_field)
     if not query_dgcv_categories(vector_field, {"vector_field"}):
         raise TypeError("interiorProduct expects a vector_field_class instance.")
     if not query_dgcv_categories(differential_form, {"differential_form"}):
@@ -180,6 +191,18 @@ def LieDerivative(
     obj: Any,
     **kwargs,
 ):
+    if query_dgcv_categories(vector_field, {"eds_vector"}):
+        if query_dgcv_categories(obj, {"eds_vector"}):
+            return vector_field.bracket(obj)
+        if query_dgcv_categories(obj, {"eds_form"}):
+            from ...eds._calculus import extDer
+
+            inner = obj(vector_field)
+            outer = extDer(obj)(vector_field)
+            if isinstance(inner, numbers.Number):
+                return outer
+            return extDer(inner) + outer
+        return vector_field(obj)
     if not query_dgcv_categories(vector_field, {"vector_field"}):
         raise TypeError(
             "LieDerivative expects the first argument to be a vector field."

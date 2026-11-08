@@ -104,6 +104,13 @@ def LaTeX(obj: Any, removeBARs: bool | None = None, verbose: bool = False) -> st
         if isinstance(x, set):
             elems = [_strip_display_dollars(_latex_of(e)) for e in x]
             return r"\left\{ " + ", ".join(elems) + r" \right\}"
+        if isinstance(x, Mapping) and type(x) is not dict:
+            f = getattr(x, "_repr_latex_", None)
+            if callable(f):
+                s = f()
+                if isinstance(s, str):
+                    return _unwrap_math_delims(s)
+
         if isinstance(x, Mapping):
             elems = [
                 f"{_strip_display_dollars(_latex_of(k))} : "
@@ -206,7 +213,7 @@ def LaTeX_eqn_system(
     eqn_dict,
     math_mode="$$",
     relation=" = ",
-    left_prefix="",
+    left_prefix=None,
     left_suffix="",
     right_prefix="",
     right_suffix="",
@@ -228,6 +235,8 @@ def LaTeX_eqn_system(
             rhs_only_format = True
     else:
         rhs_only_format = False
+    if left_prefix is None:
+        left_prefix = getattr(eqn_dict, "_dgcv_eqn_left_prefix", "")
 
     if add_period is True:
         punct = "."

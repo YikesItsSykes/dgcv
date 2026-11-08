@@ -31,6 +31,7 @@ from .._aux._backends._symbolic_router import (
     _scalar_is_minus_one,
     _scalar_is_one,
     _scalar_is_zero,
+    get_free_symbols,
     ratio,
     register_zero_test,
     scalars_equal,
@@ -60,11 +61,12 @@ from .._aux._backends._types_and_constants import (
     zero,
 )
 from .._aux._utilities._config import dgcv_warning
-from .._aux._vmf._safeguards import retrieve_passkey
+from .._aux._vmf._safeguards import query_dgcv_categories, retrieve_passkey
 from ..core.base import dgcv_class
 from . import _constants
 from ._atoms import (
     _custom_conj,
+    _in_normal_order,
     _new_bridge,
     _nf_hooks,
     _zero_obstruction,
@@ -270,7 +272,7 @@ def _normalize_add_mul(op, args, base):
             base = (op, *other_terms)
         elif len(other_terms) == 0:
             base = 0
-        elif hasattr(other_terms[0], "base"):
+        elif isinstance(other_terms[0], zero_form_class):
             base = other_terms[0].base
         else:
             base = other_terms[0]
@@ -308,7 +310,8 @@ def _normalize_pow(op, args, base):
             else:
                 base = left**right
         elif (
-            isinstance(left, zero_form_class)
+            isinstance(right, numbers.Integral)
+            and isinstance(left, zero_form_class)
             and isinstance(left.base, tuple)
             and left.base[0] == "pow"
         ):
@@ -527,6 +530,7 @@ class zero_form_class(dgcv_class):
             )
         self._base = base
         self._nf_cache = None
+        self._hash = None
         if isinstance(base, (zero_form_atom, zero_form_class, _BuiltinLeaf)):
             self._is_zero = base.is_zero
             self._is_one = base.is_one
@@ -555,6 +559,7 @@ class zero_form_class(dgcv_class):
     @base.setter
     def base(self, value):
         self._base = value
+        self._hash = None
 
     @property
     def _nf(self):
@@ -603,6 +608,7 @@ class zero_form_class(dgcv_class):
         obj = object.__new__(cls)
         obj._base = None
         obj._nf_cache = rf
+        obj._hash = None
         obj._is_zero = rf.is_zero
         obj._is_one = False
         return obj
@@ -614,6 +620,7 @@ class zero_form_class(dgcv_class):
         obj = object.__new__(cls)
         obj._base = None
         obj._nf_cache = rf
+        obj._hash = None
         obj._is_zero = rf.is_zero
         obj._is_one = False
         obj._factored = factored
@@ -721,6 +728,8 @@ class zero_form_class(dgcv_class):
                         FS |= leaf.free_symbols
                     elif isinstance(leaf, zero_form_atom):
                         FS |= {leaf}
+                    else:
+                        FS |= set(get_free_symbols(leaf))
             self._free_symbols = FS
         return self._free_symbols
 
@@ -728,7 +737,11 @@ class zero_form_class(dgcv_class):
         raise AttributeError
 
     def __hash__(self):
-        return hash(self.base)
+        h = self._hash
+        if h is None:
+            h = hash(self.base)
+            self._hash = h
+        return h
 
     def __eq__(self, other):
         if not isinstance(other, zero_form_class):
@@ -778,10 +791,12 @@ class zero_form_class(dgcv_class):
     def sort_key(self, order=None):
         return (4, self.base)  # some tedious details here... perhaps remove
 
-    def _subs_dgcv(self, data, with_diff_corollaries=False):
-        return self.subs(data, with_diff_corollaries=with_diff_corollaries)
+    def _subs_dgcv(self, data, with_diff_corollaries=False, with_conjugates=None):
+        return self.subs(
+            data, with_diff_corollaries=with_diff_corollaries, with_conjugates=with_conjugates
+        )
 
-    def subs(self, data, with_diff_corollaries=False):
+    def subs(self, data, with_diff_corollaries=False, with_conjugates=None):
         """
         Symbolic substitution in abstract_ZF.
         """
@@ -794,6 +809,10 @@ class zero_form_class(dgcv_class):
                 dgcv_warning(
                     "Provided substitution rules had repeat keys, and only one was used."
                 )
+        if isinstance(data, dict):
+            close = with_diff_corollaries if with_conjugates is None else with_conjugates
+            if close:
+                data = _conjugate_closure(data, "subs")
         if _builtin() and not with_diff_corollaries and isinstance(data, dict):
             fast = _nf_hooks["subs"](self, data)
             if fast is not None:
@@ -802,7 +821,11 @@ class zero_form_class(dgcv_class):
             return self
         if isinstance(self.base, zero_form_atom):
             return zero_form_class(
-                self.base.subs(data, with_diff_corollaries=with_diff_corollaries)
+                self.base.subs(
+                    data,
+                    with_diff_corollaries=with_diff_corollaries,
+                    with_conjugates=False,
+                )
             )
         if isinstance(self.base, _BuiltinLeaf):
             return zero_form_class(self.base.subs(data))
@@ -835,7 +858,9 @@ class zero_form_class(dgcv_class):
                     return arg.subs(data)
                 if isinstance(arg, (zero_form_atom, zero_form_class)):
                     newArg = arg.subs(
-                        sub_data, with_diff_corollaries=with_diff_corollaries
+                        sub_data,
+                        with_diff_corollaries=with_diff_corollaries,
+                        with_conjugates=False,
                     )
                     if isinstance(newArg, abstract_differential_form_atom):
                         if newArg.degree == 0:
@@ -1052,6 +1077,14 @@ class zero_form_class(dgcv_class):
             return zero_form_class(factors)
         elif isinstance(other, zero_form_atom):
             return zero_form_class(("mul", self.base, other))
+        if (
+            not _builtin()
+            and query_dgcv_categories(
+                other, ("tensor_field", "differential_form", "vector_field")
+            )
+            and not any(isinstance(leaf, zero_form_atom) for leaf in self.free_symbols)
+        ):
+            return self.to_engine() * other
 
         return NotImplemented
 
@@ -1104,6 +1137,17 @@ class zero_form_class(dgcv_class):
         return NotImplemented
 
     def _eval_simplify(self, try_hard=False, reflect_conjugation=False, **kwargs):
+        constraints = kwargs.pop("constraints", None)
+        with_conjugates = kwargs.pop("with_conjugates", True)
+        if constraints is not None:
+            return _simplify_under_constraints(
+                self,
+                constraints,
+                with_conjugates,
+                try_hard=try_hard,
+                reflect_conjugation=reflect_conjugation,
+                **kwargs,
+            )
         if _builtin():
             out = self._builtin_simplify()
             if reflect_conjugation:
@@ -1347,6 +1391,12 @@ class zero_form_class(dgcv_class):
         return zf, True
 
     def _eval_canonicalize(self, depth=1000):
+        if all(
+            _in_normal_order(leaf)
+            for leaf in self.free_symbols
+            if isinstance(leaf, zero_form_atom)
+        ):
+            return self
         zf = self
         stabilized = False
         count = 0
@@ -1620,6 +1670,8 @@ def _loop_ZF_format_conversions(expr, withSimplify=False, reformatter=None):
     bridge = _new_bridge()
     lowered = bridge.lower(expr)[0]
     lowered = _routed_simplify(format(lowered)) if withSimplify else format(lowered)
+    if not bridge.reverse:
+        return zero_form_class(lowered)
     return zero_form_class(_engine_to_abstract_ZF(lowered, bridge.reverse))
 
 

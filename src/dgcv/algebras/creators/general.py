@@ -16,6 +16,7 @@ from ..._aux._vmf._safeguards import (
     query_dgcv_categories,
     retrieve_passkey,
     unique_label,
+    validate_creator_labels,
     validate_label,
     validate_label_list,
 )
@@ -48,6 +49,7 @@ def createAlgebra(
     tensor_representation=None,
     verbose: bool = False,
     assume_skew: bool = False,
+    dimension=None,
     basis_order_for_supplied_str_eqns=None,
     _simple=None,
     special_processing_rules: dict = None,
@@ -60,7 +62,7 @@ def createAlgebra(
     jet_determinacy_order_ansatz: int = None,
     process_with_decompose=False,
     _basis_labels_parent=None,
-    _markers={},
+    _markers=None,
     **kwargs,
 ):
     """
@@ -83,6 +85,9 @@ def createAlgebra(
         Whether to compute and store the matrix representation of the algebra.
     verbose : bool, optional
         If True, provides information during the creation process.
+    dimension : int, optional
+        The algebra dimension. Needed when a sparse structure dictionary leaves trailing basis
+        elements out (they appear in no nonzero structure constant); inferred otherwise.
     special_processing_rules: dict, optional
         Use this to pass a list of alebra-like objects from another library (i.e., non-dgcv).
         The dictionary should have two string labeled keys "mul" and  "zero_obst". These key's
@@ -99,7 +104,11 @@ def createAlgebra(
     if kwargs.get("return_created_obj"):  # old keyword support
         return_created_object = kwargs.get("return_created_obj")
     notes = {}
-    _markers["_educed_properties"] = dict()
+    requested_dimension = dimension
+    if _markers is None:
+        _markers = {}
+    if not isinstance(_markers.get("_educed_properties"), dict):
+        _markers["_educed_properties"] = dict()
     if get_dgcv_category(obj) == "Tanaka_symbol":
         t_message = "True by construction: data --> `Tanaka_symbol` --> `createAlgebra`"
         _markers["_educed_properties"]["is_Lie_algebra"] = t_message
@@ -124,6 +133,16 @@ def createAlgebra(
             ) from None
         obj = symbolData["structure_data"]
         grading = symbolData["grading"]
+    coframe_dimension = None
+    if get_dgcv_category(obj) == "abst_coframe":
+        coframe_data = obj.export_algebra_data(base_field=base_field)
+        obj = coframe_data["structure_data"]
+        assume_skew = True
+        coframe_dimension = coframe_data["dimension"]
+        if requested_dimension is not None and requested_dimension != coframe_dimension:
+            raise ValueError(
+                f"`dimension={requested_dimension}` does not match the {coframe_dimension} forms of the coframe."
+            ) from None
 
     passkey = retrieve_passkey()
     if (_markers.get("sum", False) or _markers.get("prod", False)) and _markers.get(
@@ -136,6 +155,8 @@ def createAlgebra(
             label, _markers["_tex_label"] = unique_label(
                 label, tex_label=incoming_tex_label
             )
+    if forgo_vmf_registry is False:
+        validate_creator_labels("finite_algebra_systems", (label,))
     if (
         label in listVar(algebras_only=True)
         and get_dgcv_settings_registry()["forgo_warnings"] is not True
@@ -328,6 +349,10 @@ def createAlgebra(
     else:
         if verbose:
             print("processing structure data...")
+        if isinstance(obj, dict) and not obj and requested_dimension is None and coframe_dimension is None:
+            raise ValueError(
+                "The structure data dictionary is empty, so the algebra dimension cannot be inferred; pass `dimension=`."
+            ) from None
         try:
             vsd = _validate_structure_data(
                 obj,
@@ -336,6 +361,7 @@ def createAlgebra(
                 basis_order_for_supplied_str_eqns=basis_order_for_supplied_str_eqns,
                 determinacy_order_ansatz=jet_determinacy_order_ansatz,
                 process_with_decompose=process_with_decompose,
+                dimension=requested_dimension if requested_dimension is not None else coframe_dimension,
             )
             if vsd[-1] == "matrix":
                 t_message = "True by construction: list of matrices --> `createAlgebra`"
@@ -371,6 +397,10 @@ def createAlgebra(
         except dgcv_exception_note as e:
             raise SystemExit(e)
         dimension = structure_data.shape[0]
+    if requested_dimension is not None and dimension != requested_dimension:
+        raise ValueError(
+            f"`dimension={requested_dimension}` does not match the dimension {dimension} of the given structure data."
+        ) from None
 
     if (_markers.get("sum", False) or _markers.get("prod", False)) and _markers.get(
         "lockKey", None
@@ -535,6 +565,8 @@ def createAlgebra(
         )
 
     if forgo_vmf_registry is False:
+        if mint:
+            validate_creator_labels("finite_algebra_systems", (label,), basis_labels)
         update_working_namespace({label: algebra_obj})
         if mint:
             update_working_namespace(zip(basis_labels, algebra_obj.basis))

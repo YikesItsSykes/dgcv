@@ -27,10 +27,10 @@ from ..._aux._backends._symbolic_router import (
     subs,
 )
 from ..._aux._backends._types_and_constants import (
+    _disposable_symbol,
     _disposable_symbols,
     exact_fraction as _exact_fraction,
     rational,
-    symbol,
 )
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._utilities._misc import zip_sum
@@ -107,7 +107,7 @@ def _commutant_eigenspace_vectors(mat, free_vars, max_attempts=6):
 
 def _centroid_ideal_components(solMat, free_vars, attempts=8):
     order = sorted(free_vars, key=str)
-    var = symbol(create_key("_cpoly"))
+    var = _disposable_symbol(create_key("_cpoly"))
     for attempt in range(attempts):
         bound = 8 * (attempt + 1)
         z = solMat.subs({v: random.randint(-bound, bound) for v in order})
@@ -489,7 +489,7 @@ def _as_fraction(value):
 
 
 def _casimir_spectrum(casimir, rank, dimension):
-    var = symbol(create_key("_rootLength"))
+    var = _disposable_symbol(create_key("_rootLength"))
     minimal = _matrix_minimal_polynomial(casimir, 4, var)
     if minimal is None:
         return None

@@ -79,7 +79,7 @@ def linear_combination(
     else:
         pref = kwargs.pop("prefix", None) or "_dgcvvar_"
         vl = pref + uuid.uuid4().hex[:6]
-    if _disposable and coefficient_assumptions is None:
+    if coefficient_assumptions is None and (_disposable or not isinstance(coef_label, str)):
         v = [
             _disposable_symbol(f"{vl}{x}")
             for x in range(initialIndex, initialIndex + len(elements))

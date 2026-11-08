@@ -6,7 +6,7 @@ from ..._aux._backends._symbolic_router import (
     get_free_symbols,
     subs,
 )
-from ..._aux._backends._types_and_constants import symbol
+from ..._aux._backends._types_and_constants import _disposable_symbols
 from ..._aux._vmf._safeguards import create_key, get_dgcv_category
 from ...algebras import _extract_basis
 from ...core.solvers import solve_dgcv
@@ -152,7 +152,7 @@ def _DS_realign(spanners, primary_grading):
     weights = sorted({w for part_map in parts for w in part_map})
 
     label = create_key(prefix="_dsRealign")
-    avars = [symbol(f"{label}{n}") for n in range(len(spanners))]
+    avars = _disposable_symbols(label, len(spanners))
     var_set = set(avars)
 
     blocks = dict()

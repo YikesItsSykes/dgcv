@@ -22,6 +22,22 @@ from .general import tensor_field_class
 from .general.workers import _process_coeffs_dict_new
 
 
+def _slot_coordinate(spaces, idx, sys):
+    space = spaces.get(sys) if spaces else None
+    if space is None:
+        return idx if sys is None else None
+    try:
+        return space[idx]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _same_coordinate(x, y):
+    if x is None or y is None:
+        return False
+    return x is y or str(x) == str(y)
+
+
 class differential_form_class(tensor_field_class):
     _dgcv_categories = {"differential_form"}
 
@@ -445,6 +461,7 @@ class differential_form_class(tensor_field_class):
                     continue
 
                 a, b, c = k2
+                other_spaces = getattr(other, "_variable_spaces", None)
                 for k1, v1 in self.coeff_dict.items():
                     if _scalar_is_zero(v1):
                         continue
@@ -452,7 +469,16 @@ class differential_form_class(tensor_field_class):
                     deg = len(k1) // 3
                     for idx in range(deg):
                         idx2, idx3 = deg + idx, 2 * deg + idx
-                        if a == k1[idx] and b + k1[idx2] == 1 and c == k1[idx3]:
+                        if b + k1[idx2] == 1 and (
+                            (a == k1[idx] and c == k1[idx3])
+                            or (
+                                (c is None or k1[idx3] is None)
+                                and _same_coordinate(
+                                    _slot_coordinate(self._variable_spaces, k1[idx], k1[idx3]),
+                                    _slot_coordinate(other_spaces, a, c),
+                                )
+                            )
+                        ):
                             new_key = tuple(
                                 elem
                                 for count, elem in enumerate(k1)

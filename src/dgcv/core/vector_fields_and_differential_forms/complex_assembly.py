@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
+from ..._aux._utilities._config import dgcv_warning
 from ..._aux._vmf.vmf import vmf_lookup
 from ..dgcv_core import vector_field_class
 from .retrieval import get_VF
@@ -133,9 +133,6 @@ def _find_family_member(coordinate: Any, *, coorType: str, dispatcher: str):
 
 
 def _warnForNonholos(hol_vars: Sequence[Any], *, dispatcher: str):
-    if get_dgcv_settings_registry().get("forgo_warnings", False):
-        return
-
     inadmissibles = []
     for v in hol_vars:
         info = vmf_lookup(v, relatives=False)

@@ -295,7 +295,7 @@ class algebra_dual(dgcv_class):
                 label = "Alg_" + create_key()
 
             if register_in_vmf is True:
-                from .subalgebras import createAlgebra
+                from .creators import createAlgebra
 
                 return createAlgebra(
                     self.dimension * other.dimension,

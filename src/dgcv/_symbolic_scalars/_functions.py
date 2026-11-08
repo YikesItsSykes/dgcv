@@ -18,7 +18,12 @@ from .._aux.printing.printing._string_processing import (
 from ..eds import _zero_forms as _zf_mod
 from ..eds._atoms import zero_form_atom
 from ..eds._constants import PI, E, I, NamedConstant
-from ..eds._zero_forms import _base_free_symbols, _nf_of, zero_form_class
+from ..eds._zero_forms import (
+    _base_free_symbols,
+    _nf_of,
+    _top_level_ops,
+    zero_form_class,
+)
 from . import _latex as _latex_mod
 from . import _poly
 from ._factor import _integer_root
@@ -28,6 +33,7 @@ from ._normal_form import (
     ELEMENTARY,
     FUNCTION,
     NUMBER_RADICAL,
+    POWER,
     RADICAL,
     RF,
     LeafKey,
@@ -45,6 +51,7 @@ from ._normal_form import (
     rf_gen,
     rf_number,
     rf_one,
+    rf_opaque,
     rf_zero,
 )
 
@@ -530,6 +537,127 @@ class Radical(_CompoundLeaf):
             )
 
         return LeafKey(self.conjugated, RADICAL, 0, (), self.q, _arg_str(arg))
+
+
+class Power(_CompoundLeaf):
+    __hash__ = _CompoundLeaf.__hash__
+    _head_kind = _poly.K_POWER
+
+    def __init__(self, base, exponent, conjugated=False):
+        self.args = (base, exponent)
+        self.conjugated = conjugated
+        key = ("dgcv.builtin.power", base, exponent)
+        self._hash = hash(key + (True,)) if conjugated else hash(key)
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Power)
+            and other.conjugated == self.conjugated
+            and other.args == self.args
+        )
+
+    def plain(self):
+        return Power(self.args[0], self.args[1])
+
+    def _exp_rf(self):
+        return nf_from_base(self.args[1])
+
+    @property
+    def free_symbols(self):
+        if self.conjugated:
+            out = set()
+            for a in self.args:
+                out |= _base_free_symbols(base_from_nf(conj_rf(nf_from_base(a))))
+            return out
+        return _CompoundLeaf.free_symbols.fget(self)
+
+    def _kind_bits(self):
+        base = self._arg_rf()
+        k = _poly.K_POWER | base.kinds() | self._exp_rf().kinds()
+        if self.conjugated:
+            return k | _poly.K_CONJUGATED | _poly.K_MOVES
+        if k & _MOVING or _sign(base) != _POS:
+            k |= _poly.K_MOVES
+        return k
+
+    def partials(self):
+        base, exponent = self._arg_rf(), self._exp_rf()
+        own = rf_gen(self)
+        if self.conjugated:
+            cb, ce = conj_rf(base), conj_rf(exponent)
+            return [
+                (ce * own / cb, base_from_nf(cb)),
+                (own * conj_rf(elementary("log", base)), base_from_nf(ce)),
+            ]
+        return [
+            (exponent * own / base, self.args[0]),
+            (own * elementary("log", base), self.args[1]),
+        ]
+
+    def with_args(self, new_args):
+        out = power(
+            _nf_of(to_active_engine(new_args[0])),
+            _nf_of(to_active_engine(new_args[1])),
+        )
+        return conj_rf(out) if self.conjugated else out
+
+    def conj_rf(self):
+        if self.conjugated:
+            return rf_gen(self.plain())
+        base = self._arg_rf()
+        if _sign(base) == _POS:
+            return power(base, conj_rf(self._exp_rf()))
+        return _flagged_power(self)
+
+    def _latex(self, printer=None, raw=True, **kwargs):
+        out = _power_tex(self.args[0], self._exp_rf())
+        return f"\\overline{{{out}}}" if self.conjugated else out
+
+    def _power_latex(self, e):
+        if self.conjugated:
+            return latex_superscript(self._latex(), str(e))
+        return _power_tex(self.args[0], self._exp_rf() * rf_number(e))
+
+    def __str__(self):
+        out = _power_str(self.args[0], self.args[1])
+        return f"conjugate({out})" if self.conjugated else out
+
+    def _sort_key(self):
+        return LeafKey(
+            self.conjugated,
+            POWER,
+            0,
+            natural_key(_arg_str(self.args[0])),
+            0,
+            _arg_str(self.args[1]),
+        )
+
+
+def _power_tex(base, exponent):
+    exp_tex = nf_latex(exponent)
+    if isinstance(base, zero_form_atom):
+        head = base._latex()
+        if "^" in head:
+            head = f"\\left({head}\\right)"
+    elif isinstance(base, numbers.Number):
+        head = _arg_tex(base)
+        if not (isinstance(base, numbers.Real) and base >= 0):
+            head = f"\\left({head}\\right)"
+    else:
+        head = f"\\left({_arg_tex(base)}\\right)"
+    return f"{head}^{{{exp_tex}}}"
+
+
+def _power_str(base, exponent):
+    head = _arg_str(base)
+    if not isinstance(base, zero_form_atom) and not (
+        isinstance(base, numbers.Real) and base >= 0
+    ):
+        head = f"({head})"
+    body = _arg_str(exponent)
+    if _top_level_ops(body):
+        body = f"({body})"
+    return f"{head}**{body}"
 
 
 class FunctionHead:
@@ -1037,7 +1165,14 @@ def elementary(name, rf):
     leaf = _single_gen(rf)
     if leaf is not None and getattr(leaf, "conjugated", False):
         if name not in _BRANCHED:
-            return conj_rf(elementary(name, rf_gen(leaf.plain())))
+            inner = elementary(name, rf_gen(leaf.plain()))
+            inner_leaf = _single_gen(inner)
+            if not (
+                isinstance(inner_leaf, ElementaryFunction)
+                and inner_leaf.name == name
+                and not inner_leaf.conjugated
+            ):
+                return conj_rf(inner)
     elif leaf is not None:
         if name == "log" and leaf == E:
             return rf_one()
@@ -1087,6 +1222,9 @@ def elementary(name, rf):
         c = _poly.p_int_content(rf.num)
         if c > 1:
             return elementary("exp", rf * rf_number(Fraction(1, c))) ** c
+        val = _exp_log_power(rf)
+        if val is not None:
+            return val
         val = _exp_special(rf)
         if val is not None:
             return val
@@ -1262,6 +1400,142 @@ def radical(rf, q):
     return _radical_const(Fraction(c, d), q) * _radical_core(core, q)
 
 
+_powers = [False]
+
+
+def _power_leaf(core, f0, q):
+    base = base_from_nf(core)
+    exponent = f0 if q == 1 else f0 * rf_number(Fraction(1, q))
+    leaf = Power(base, base_from_nf(exponent))
+    gid = _poly.gen_id(leaf)
+    if gid not in _poly._GRADED:
+        _poly.register_graded(
+            gid,
+            ("power", base, base_from_nf(f0)),
+            q,
+            lambda index, core=core, f0=f0: _power_leaf(core, f0, index),
+        )
+    _mergeable[0] = True
+    _powers[0] = True
+    return rf_gen(leaf)
+
+
+def _flagged_power(plain):
+    leaf = Power(plain.args[0], plain.args[1], True)
+    gid = _poly.gen_id(leaf)
+    if gid not in _poly._GRADED:
+        graded = _poly._GRADED.get(_poly.gen_id(plain))
+        if graded is not None:
+            key, index, factory = graded
+            _poly.register_graded(
+                gid,
+                ("power_conj",) + key[1:],
+                index,
+                lambda common, f=factory: conj_rf(f(common)),
+            )
+    return rf_gen(leaf)
+
+
+def _power_mono(core, m, c, den):
+    piece = RF({m: c}, den)
+    if piece.is_zero:
+        return rf_one()
+    if piece.is_constant:
+        return power(core, piece)
+    cn = _poly.p_int_content(piece.num)
+    cd = _poly.p_int_content(piece.den)
+    num = piece.num if cn == 1 else {mm: v // cn for mm, v in piece.num.items()}
+    dn = piece.den if cd == 1 else {mm: v // cd for mm, v in piece.den.items()}
+    p = cn
+    if _poly.p_leading_sign(num) < 0:
+        num = _poly.p_neg(num)
+        p = -p
+    return _power_leaf(core, RF(num, dn, canonical=True), cd) ** p
+
+
+def _power_core(core, exponent):
+    if _poly.p_has_float(exponent.num) or _poly.p_has_float(exponent.den):
+        return _power_leaf(core, exponent, 1)
+    out = rf_one()
+    for m, c in exponent.num.items():
+        out = out * _power_mono(core, m, c, exponent.den)
+    return out
+
+
+def _power_const(value, exponent):
+    fa = _factor_integer(value.numerator)
+    fb = _factor_integer(value.denominator)
+    if fa is None or fb is None:
+        return _power_core(rf_number(value), exponent)
+    out = rf_one()
+    for sign, factors in ((1, fa), (-1, fb)):
+        for prime, k in factors.items():
+            out = out * _power_core(rf_number(prime), exponent * rf_number(sign * k))
+    return out
+
+
+def power(base, exponent):
+    if exponent.is_constant:
+        v = exponent.constant_value()
+        if isinstance(v, numbers.Integral):
+            return base ** int(v)
+        if isinstance(v, Fraction):
+            p, q = v.numerator, v.denominator
+            out = radical(base, q) ** (p % q)
+            if p // q:
+                out = out * base ** (p // q)
+            return out
+        return rf_opaque(("pow", base_from_nf(base), base_from_nf(exponent)))
+    if base.is_one:
+        return rf_one()
+    if base.is_constant:
+        v = base.constant_value()
+        if isinstance(v, (int, Fraction)) and v > 0:
+            return _power_const(Fraction(v), exponent)
+        return _power_core(base, exponent)
+    leaf = _single_gen(base)
+    if leaf is not None:
+        arg = _positive_exp_argument(leaf)
+        if arg is not None:
+            return elementary("exp", exponent * arg)
+    if _poly.p_has_float(base.num) or _poly.p_has_float(base.den):
+        return _power_core(base, exponent)
+    cn = _poly.p_int_content(base.num)
+    cd = _poly.p_int_content(base.den)
+    if cn == 1 and cd == 1:
+        return _power_core(base, exponent)
+    core = RF(
+        base.num if cn == 1 else {m: v // cn for m, v in base.num.items()},
+        base.den if cd == 1 else {m: v // cd for m, v in base.den.items()},
+        canonical=True,
+    )
+    return _power_const(Fraction(cn, cd), exponent) * _power_core(core, exponent)
+
+
+def _exp_log_power(rf):
+    if len(rf.num) != 1:
+        return None
+    ((m, c),) = rf.num.items()
+    found = None
+    for g, e in m:
+        leaf = _poly.gen_leaf(g)
+        if (
+            e == 1
+            and isinstance(leaf, ElementaryFunction)
+            and leaf.name == "log"
+            and not leaf.conjugated
+        ):
+            if found is not None:
+                return None
+            found = g
+    if found is None:
+        return None
+    exponent = RF({tuple(t for t in m if t[0] != found): c}, rf.den)
+    if exponent.is_constant:
+        return None
+    return power(_poly.gen_leaf(found)._arg_rf(), exponent)
+
+
 def _all_real(rf):
     return not rf.kinds() & _MOVING
 
@@ -1353,6 +1627,9 @@ def _real_leaf_sign(leaf):
         return _POS if leaf.name in ("exp", "cosh") else 0
     if isinstance(leaf, Radical):
         return _sign(leaf._arg_rf())
+    if isinstance(leaf, Power) and not leaf.conjugated:
+        if _sign(leaf._arg_rf()) == _POS and _all_real(leaf._exp_rf()):
+            return _POS
     return 0
 
 
@@ -1368,24 +1645,77 @@ def _is_number_radical(leaf):
     return isinstance(leaf, Radical) and type(leaf.args[0]) is int and leaf.args[0] > 0
 
 
-def merge_monomial(m, extra=None):
+class _PowerSlot:
+    __slots__ = ("base",)
+
+    def __init__(self, base):
+        self.base = base
+
+
+def _add_power(powers, leaf, e):
+    base = leaf.args[0]
+    total = leaf._exp_rf() * rf_number(e)
+    prev = powers.get(base)
+    powers[base] = total if prev is None else prev + total
+
+
+def _fill_powers(out, powers):
+    numeric = {}
+    result = []
+    for item in out:
+        if not isinstance(item, _PowerSlot):
+            result.append(item)
+            continue
+        base = item.base
+        total = powers[base]
+        if total.is_zero:
+            continue
+        if type(base) is int and base > 0 and not _poly.p_has_float(total.num):
+            k = _poly.p_int_content(total.num)
+            if k > 1:
+                base = base**k
+                total = total * rf_number(Fraction(1, k))
+            key = base_from_nf(total)
+            prev = numeric.get(key)
+            if prev is not None:
+                result[prev] = (Power(result[prev][0].args[0] * base, key), 1)
+                continue
+            numeric[key] = len(result)
+            result.append((Power(base, key), 1))
+            continue
+        result.append((Power(base, base_from_nf(total)), 1))
+    return result
+
+
+def merge_monomial(m, extra=None, pfold=None):
     if not _mergeable[0]:
         return None
     exp_count = 0 if extra is None else 2
     radicals = {}
+    powers = {}
     for g, e in m:
         leaf = _poly.gen_leaf(g)
         if _is_exp_leaf(leaf):
             exp_count += 1
         elif _is_number_radical(leaf):
             radicals.setdefault((leaf.q, e), []).append(leaf.args[0])
+        elif isinstance(leaf, Power) and not leaf.conjugated:
+            _add_power(powers, leaf, e)
+    if pfold is not None:
+        pextra, shifts = pfold
+        for g, e in pextra.items():
+            _add_power(powers, _poly.gen_leaf(g), e)
+        for base, shift in shifts.items():
+            if base in powers:
+                powers[base] = powers[base] + rf_number(shift)
     merge_exp = exp_count > 1
-    if not merge_exp and all(len(v) < 2 for v in radicals.values()):
+    if not merge_exp and not powers and all(len(v) < 2 for v in radicals.values()):
         return None
 
     out = []
     total = extra
     slot = None
+    seen = set()
     for g, e in m:
         leaf = _poly.gen_leaf(g)
         if merge_exp and _is_exp_leaf(leaf):
@@ -1403,7 +1733,20 @@ def merge_monomial(m, extra=None):
                 out.append((Radical(math.prod(members), leaf.q), e))
                 continue
             radicals[(leaf.q, e)] = None
+        elif isinstance(leaf, Power) and not leaf.conjugated:
+            base = leaf.args[0]
+            if base in seen:
+                continue
+            seen.add(base)
+            out.append(_PowerSlot(base))
+            continue
         out.append((g, e))
+    if pfold is not None:
+        for g in pfold[0]:
+            base = _poly.gen_leaf(g).args[0]
+            if base not in seen:
+                seen.add(base)
+                out.append(_PowerSlot(base))
 
     if merge_exp:
         if slot is None:
@@ -1413,7 +1756,76 @@ def merge_monomial(m, extra=None):
             del out[slot]
         else:
             out[slot] = (ElementaryFunction("exp", base_from_nf(total)), 1)
+    if powers:
+        out = _fill_powers(out, powers)
     return out
+
+
+def fold_powers(rf):
+    if not _powers[0]:
+        return None
+    num, den = rf.num, rf.den
+    bases = {}
+    for g in rf.gens():
+        leaf = _poly.gen_leaf(g)
+        if isinstance(leaf, Power) and not leaf.conjugated:
+            bases.setdefault(leaf.args[0], set()).add(g)
+    if not bases:
+        return None
+    pextra = {}
+    shifts = {}
+    pending = dict(bases)
+    progress = True
+    while progress:
+        progress = False
+        if len(den) == 1:
+            ((m, c),) = den.items()
+            keep = []
+            for g, e in m:
+                leaf = _poly.gen_leaf(g)
+                if isinstance(leaf, Power) and not leaf.conjugated:
+                    pextra[g] = -e
+                    progress = True
+                else:
+                    keep.append((g, e))
+            if progress:
+                den = {tuple(keep): c}
+        for base, gids in list(pending.items()):
+            if gids.isdisjoint(pextra) and not all(
+                any(g in gids for g, _ in t) for t in num
+            ):
+                continue
+            del pending[base]
+            k = kp = 0
+            if isinstance(base, numbers.Number):
+                if type(base) is not int or base < 2:
+                    continue
+                while _poly.p_int_content(den) % base == 0:
+                    den = {mm: v // base for mm, v in den.items()}
+                    k += 1
+                while _poly.p_int_content(num) % base == 0:
+                    num = {mm: v // base for mm, v in num.items()}
+                    kp += 1
+            else:
+                u = nf_from_base(base)
+                if not u.is_polynomial or u.is_constant:
+                    continue
+                while True:
+                    q = _poly.p_div_exact(den, u.num)
+                    if q is None:
+                        break
+                    den, k = q, k + 1
+                while True:
+                    q = _poly.p_div_exact(num, u.num)
+                    if q is None:
+                        break
+                    num, kp = q, kp + 1
+            if k or kp:
+                shifts[base] = kp - k
+                progress = True
+    if not pextra and not shifts:
+        return None
+    return num, den, pextra, shifts
 
 
 def split_exp_denominator(rf):
@@ -1431,13 +1843,13 @@ def split_exp_denominator(rf):
     return {(): c}, -total
 
 
-def _display_poly(p, scale, extra, changed):
+def _display_poly(p, scale, extra, changed, pfold=None):
     keys = _leaf_keys(_poly.p_gens(p))
     parts = []
     for m, c in sorted(p.items(), key=lambda kv: _term_key(kv[0], keys)):
         if scale != 1:
             c = _fold_fraction(Fraction(c) * scale)
-        shown = merge_monomial(m, extra)
+        shown = merge_monomial(m, extra, pfold)
         if shown is None:
             shown = m
         else:
@@ -1466,15 +1878,23 @@ def display_base(zf):
         return None
     if not rf.num or _poly.p_has_float(rf.num) or _poly.p_has_float(rf.den):
         return None
+    fold = fold_powers(rf)
+    pfold = None
+    if fold is not None:
+        num, den, pextra, shifts = fold
+        rf = RF(num, den, canonical=True)
+        pfold = (pextra, shifts)
     den, extra = split_exp_denominator(rf)
-    changed = [extra is not None]
+    changed = [extra is not None or fold is not None]
     if _poly.p_is_const(den):
         d = den[()]
-        out = _display_poly(rf.num, 1 if d == 1 else Fraction(1, d), extra, changed)
+        out = _display_poly(
+            rf.num, 1 if d == 1 else Fraction(1, d), extra, changed, pfold
+        )
     else:
         out = (
             "div",
-            _display_poly(rf.num, 1, None, changed),
+            _display_poly(rf.num, 1, None, changed, pfold),
             _display_poly(den, 1, None, changed),
         )
     return out if changed[0] else None
@@ -1488,7 +1908,9 @@ def _leaf_kind(leaf):
             role == "standard" and leaf.label.startswith(conjugation_prefix())
         ):
             k = _poly.K_CONJUGATED
-        if not (role in ("real", "imaginary") or "real" in leaf._markers):
+        if not (role in ("real", "imaginary") or leaf._declared_real()):
+            k |= _poly.K_MOVES
+        elif leaf.coframe_derivatives and leaf._eval_conjugate() != leaf:
             k |= _poly.K_MOVES
         return k
     bits = getattr(leaf, "_kind_bits", None)
@@ -1500,8 +1922,10 @@ def _leaf_kind(leaf):
 _poly.leaf_kind = _leaf_kind
 _latex_mod._merge_monomial = merge_monomial
 _latex_mod._split_exp_denominator = split_exp_denominator
+_latex_mod._fold_powers = fold_powers
 _zf_mod._type_hierarchy.update(
-    dict.fromkeys((FunctionAtom, ElementaryFunction, Radical), 2)
+    dict.fromkeys((FunctionAtom, ElementaryFunction, Radical, Power), 2)
 )
 _HOOKS["exp"] = lambda rf: elementary("exp", rf)
 _HOOKS["radical"] = radical
+_HOOKS["power"] = power

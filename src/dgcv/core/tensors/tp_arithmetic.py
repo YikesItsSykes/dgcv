@@ -1,8 +1,8 @@
 import numbers
 
 from ..._aux._backends._symbolic_router import simplify, subs
-from ..._aux._backends._types_and_constants import expr_numeric_types, rational
-from ..._aux._vmf._safeguards import get_dgcv_category
+from ..._aux._backends._types_and_constants import rational
+from ._protocol import _is_scalar, _is_vs_element
 from .promotion import _merge_normalized
 from .shapes import _infer_shape
 
@@ -25,12 +25,9 @@ class _tp_arithmetic:
         return tensorProduct(new_dict, shape=self.shape)
 
     def _combine(self, other, sign, op):
-        if get_dgcv_category(other) in {
-            "algebra_element",
-            "subalgebra_element",
-        }:
+        if _is_vs_element(other):
             other = other._convert_to_tp()
-        elif isinstance(other, expr_numeric_types()):
+        elif _is_scalar(other):
             other = tensorProduct({tuple(): other})
         if not isinstance(other, tensorProduct):
             raise TypeError(
@@ -44,20 +41,20 @@ class _tp_arithmetic:
         return self._combine(other, 1, "+")
 
     def __radd__(self, other):
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             return tensorProduct({tuple(): other}) + self
 
     def __sub__(self, other):
         return self._combine(other, -1, "-")
 
     def __rsub__(self, other):
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             return tensorProduct({tuple(): other}) - self
 
     def __truediv__(self, other):
         if isinstance(other, numbers.Integral):
             return rational(1, other) * self
-        if isinstance(other, expr_numeric_types()):
+        if _is_scalar(other):
             return (1 / other) * self
 
     def __neg__(self):

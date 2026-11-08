@@ -145,7 +145,7 @@ def from_sympy(expr, symbol_map=None):
             b, ex = e.args
             return _build("pow", [conv(b), conv(ex)])
 
-        if isinstance(e, sp.conjugate):
+        if isinstance(e, _sympy_conjugate_class(sp)):
             return zero_form_class(conv(e.args[0]))._eval_conjugate()
         name = heads.get(getattr(e, "func", None))
         if name is not None:
@@ -437,7 +437,7 @@ def from_sympy_rf(expr, symbol_map=None):
                 return elementary("exp", conv(ex))
             return tree(e)
 
-        if isinstance(e, sp.conjugate):
+        if isinstance(e, _sympy_conjugate_class(sp)):
             return conj_rf(conv(e.args[0]))
         name = heads.get(getattr(e, "func", None))
         if name is not None:
@@ -452,6 +452,13 @@ def from_sympy_rf(expr, symbol_map=None):
         return tree(e)
 
     return conv(expr)
+
+
+def _sympy_conjugate_class(sp):
+    head = sp.conjugate
+    if isinstance(head, type):
+        return head
+    return sp.functions.elementary.complexes.conjugate
 
 
 def from_sage_rf(expr, names=None):

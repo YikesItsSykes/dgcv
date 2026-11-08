@@ -404,10 +404,14 @@ class RealFormReport:
     Outcome of a real-form identification.
     """
 
-    lengths: tuple
-    dimension: int
-    rank: int
-    dual_coxeter_number: int | None
     candidates: tuple
-    complex_type: str | None
     certain: bool
+    dimension: int
+    rank: int | None
+    signature: int | None = None
+    absolutely_simple: bool | None = None
+    rank_is_probabilistic: bool = False
+    source: str = "computed"
+    complex_type: str | None = None
+    lengths: tuple | None = None
+    dual_coxeter_number: int | None = None

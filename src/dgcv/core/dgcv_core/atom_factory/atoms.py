@@ -425,10 +425,11 @@ def variableProcedure(
                             for i, var_name in enumerate(var_names)
                         },
                     }
-            variable_registry["_labels"][labelLoc] = {
-                "path": ("standard_variable_systems", labelLoc),
-                "children": set(var_names),
-            }
+            if _doNotUpdateVar != passkey:
+                variable_registry["_labels"][labelLoc] = {
+                    "path": ("standard_variable_systems", labelLoc),
+                    "children": set(var_names),
+                }
 
             if paths is not None:
                 paths[labelLoc] = {

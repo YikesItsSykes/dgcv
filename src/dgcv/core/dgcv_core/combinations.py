@@ -5,6 +5,14 @@ from .fields import vector_field_class
 
 
 def VF_bracket(X, Y, *, doNotSimplify: bool = False, **_ignored):
+    if query_dgcv_categories(X, {"eds_vector"}) or query_dgcv_categories(Y, {"eds_vector"}):
+        if not (
+            query_dgcv_categories(X, {"eds_vector"}) and query_dgcv_categories(Y, {"eds_vector"})
+        ):
+            raise TypeError(
+                "VF_bracket of an abstract vector field takes another abstract vector field over the same frame"
+            )
+        return X.bracket(Y)
     if not query_dgcv_categories(X, {"vector_field"}):
         raise TypeError(
             f"VF_bracket expects X to be a vector field, got {type(X).__name__}."
@@ -111,7 +119,8 @@ def wedge(*tfs):
     types = {get_dgcv_category(tf) for tf in tfs if not check_dgcv_scalar(tf)}
     acceptables = {"algebra_element", "subalgebra_element", "tensorProduct"}
     if types != {"tensor_field"} and not all(
-        dgcv_type in acceptables for dgcv_type in types
+        dgcv_type in acceptables or query_dgcv_categories(tf, {"vs_element"})
+        for tf, dgcv_type in ((tf, get_dgcv_category(tf)) for tf in tfs if not check_dgcv_scalar(tf))
     ):
         raise TypeError(
             "`wedge` only operates on scalars and dgcv tensor field, tensor algebra, and vector space classes. The field and vector space classes moreover cannot mix."
@@ -127,7 +136,7 @@ def wedge(*tfs):
         return tf1 * tf2
     elif get_dgcv_category(tf1) == "tensor_field":
         return tf1.skew_product(tf2)
-    elif get_dgcv_category(tf1) in acceptables:
+    elif get_dgcv_category(tf1) in acceptables or query_dgcv_categories(tf1, {"vs_element"}):
         tf1 = tf1._convert_to_tp()
         return tf1.shape_inferred_tensor_product(tf2, impose_shape="skew")
     else:

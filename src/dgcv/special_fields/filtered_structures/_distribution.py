@@ -12,7 +12,11 @@ from ..._aux._backends._symbolic_router import (
     simplify,
     subs,
 )
-from ..._aux._backends._types_and_constants import exact_fraction, rational, symbol
+from ..._aux._backends._types_and_constants import (
+    _disposable_symbols,
+    exact_fraction,
+    rational,
+)
 from ..._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import (
@@ -742,7 +746,7 @@ class distribution(dgcv_class):
                 f"The distribution is singular at the point {approximation_point}. Nilpotent approximations are not yet supported for singular distributions."
             )
         vlabel = create_key("var")
-        vars = [symbol(f"{vlabel}{j}") for j in range(len(evaluated_basis))]
+        vars = _disposable_symbols(vlabel, len(evaluated_basis))
         gen_elem = sum(coef * elem for coef, elem in zip(vars, evaluated_basis))
 
         def _decomp(elem, ge=gen_elem, variables=vars):

@@ -5,6 +5,7 @@ import numbers
 from .._aux._backends._display import latex
 from .._aux._backends._symbolic_router import (
     _scalar_is_zero,
+    conjugate,
     get_free_symbols,
     is_zero_knowing_zero_is_expected,
     ratio,
@@ -12,14 +13,20 @@ from .._aux._backends._symbolic_router import (
     subs,
 )
 from .._aux._backends._types_and_constants import expr_numeric_types
-from .._aux._utilities._config import dgcv_warning, get_dgcv_settings_registry
-from .._aux._vmf._safeguards import get_dgcv_category, retrieve_passkey
+from .._aux._utilities._config import dgcv_warning
+from .._aux._vmf._safeguards import (
+    get_dgcv_category,
+    query_dgcv_categories,
+    retrieve_passkey,
+)
 from .._aux.printing.printing import lincomb_latex, lincomb_plain
 from ..core.base import dgcv_class
 from ..core.tensors import tensorProduct
 
 
 class algebra_element_class(dgcv_class):
+    _dgcv_categories = {"algebra_element", "vs_element"}
+
     def __init__(self, alg, coeff_dict, valence, format_sparse=False):
         if not get_dgcv_category(alg) == "algebra":
             raise TypeError(
@@ -98,10 +105,7 @@ class algebra_element_class(dgcv_class):
             return "elem"
 
         if not self.algebra._registered:
-            if (
-                self.algebra._exclude_from_VMF == retrieve_passkey()
-                or get_dgcv_settings_registry()["forgo_warnings"] is True
-            ):
+            if self.algebra._exclude_from_VMF == retrieve_passkey():
                 pass
             elif self.algebra._callLock == retrieve_passkey() and isinstance(
                 self.algebra._child_print_warning, str
@@ -126,10 +130,7 @@ class algebra_element_class(dgcv_class):
 
     def _repr_latex_(self, verbose=False, raw=False, **kwargs):
         if not self.vectorSpace._registered:
-            if (
-                self.vectorSpace._exclude_from_VMF == retrieve_passkey()
-                or get_dgcv_settings_registry()["forgo_warnings"] is True
-            ):
+            if self.vectorSpace._exclude_from_VMF == retrieve_passkey():
                 pass
             elif self.vectorSpace._callLock == retrieve_passkey() and isinstance(
                 self.vectorSpace._child_print_warning, str
@@ -156,10 +157,7 @@ class algebra_element_class(dgcv_class):
     def _latex_verbose(self, printer=None):
         """deprecated"""
         if not self.algebra._registered:
-            if (
-                self.algebra._exclude_from_VMF == retrieve_passkey()
-                or get_dgcv_settings_registry()["forgo_warnings"] is True
-            ):
+            if self.algebra._exclude_from_VMF == retrieve_passkey():
                 pass
             elif self.algebra._callLock == retrieve_passkey() and isinstance(
                 self.algebra._child_print_warning, str
@@ -273,6 +271,19 @@ class algebra_element_class(dgcv_class):
             {idx: simplify(j, **kwargs) for idx, j in self.coeff_dict.items()},
             self.valence,
         )
+
+    def _dgcv_eds_applyfunc(self, func):
+        return self.__class__(
+            self.algebra,
+            {idx: func(c) for idx, c in self.coeff_dict.items()},
+            self.valence,
+        )
+
+    def _eval_conjugate(self):
+        return self._dgcv_eds_applyfunc(conjugate)
+
+    def __dgcv_conjugate__(self, symbolic=False):
+        return self._dgcv_eds_applyfunc(lambda c: conjugate(c, symbolic=symbolic))
 
     def dual(self):
         return self.__class__(
@@ -493,7 +504,9 @@ class algebra_element_class(dgcv_class):
                 other = other._convert_to_tp()
         elif isinstance(other, tensorProduct):
             return self._si_wrap((self._convert_to_tp()) * other)
-        elif isinstance(other, expr_numeric_types()):
+        elif isinstance(other, expr_numeric_types()) or query_dgcv_categories(
+            other, "eds_scalar"
+        ):
             new_coeffs = {
                 idx: self._si_wrap(j * other) for idx, j in self.coeff_dict.items()
             }
@@ -507,11 +520,12 @@ class algebra_element_class(dgcv_class):
                 and self.valence == other.valence
             ):
                 return other.ambient_rep * self
-        if isinstance(other, expr_numeric_types()) or get_dgcv_category(other) in {
-            "subalgebra_element",
-            "algebra_element",
-            "tensorProduct",
-        }:
+        if (
+            isinstance(other, expr_numeric_types())
+            or query_dgcv_categories(other, "eds_scalar")
+            or get_dgcv_category(other)
+            in {"subalgebra_element", "algebra_element", "tensorProduct"}
+        ):
             return self._si_wrap(self * other)
         return NotImplemented
 
@@ -546,7 +560,9 @@ class algebra_element_class(dgcv_class):
     def __truediv__(self, other):
         if isinstance(other, numbers.Number):
             return self._si_wrap(ratio(1, other) * self)
-        elif isinstance(other, expr_numeric_types()):
+        elif isinstance(other, expr_numeric_types()) or query_dgcv_categories(
+            other, "eds_scalar"
+        ):
             return self._si_wrap((1 / other) * self)
         else:
             raise TypeError(

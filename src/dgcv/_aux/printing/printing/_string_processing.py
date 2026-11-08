@@ -28,58 +28,51 @@ from ..._utilities._config import get_dgcv_settings_registry, greek_letters
 # -----------------------------------------------------------------------------
 # utilities
 # -----------------------------------------------------------------------------
-def _format_label_with_hi_low(
-    label: str,
-    infer_suffix: bool = False,
-    prime_processing: bool = True,
-    decorations_support: bool = True,
-) -> str:
-    if not label:
-        return label
-
-    text = str(label)
-
+def _strip_conjugation_prefix(text):
     pref = get_dgcv_settings_registry().get("conjugation_prefix", "BAR")
-    is_conjugate = False
     if pref and text.startswith(pref):
-        text = text[len(pref) :]
-        is_conjugate = True
+        return text[len(pref) :], True
+    return text, False
 
-    # Entry order matters in this dict. If one key string is contained in another, the longer one must come first.
-    decoration_prefixes = {
-        "widehat_": r"\widehat",
-        "widetilde_": r"\widetilde",
-        "overline_": r"\overline",
-        "underline_": r"\underline",
-        "tilde_": r"\widetilde",
-        "hat_": r"\hat",
-        "bar_": r"\bar",
-        "vec_": r"\vec",
-        "ddot_": r"\ddot",
-        "dot_": r"\dot",
-        "check_": r"\check",
-        "breve_": r"\breve",
-        "overline": r"\overline",
-        "bar": r"\bar",
-    }
 
+# Entry order matters in this dict. If one key string is contained in another, the longer one must come first.
+_DECORATION_PREFIXES = {
+    "widehat_": r"\widehat",
+    "widetilde_": r"\widetilde",
+    "overline_": r"\overline",
+    "underline_": r"\underline",
+    "tilde_": r"\widetilde",
+    "hat_": r"\hat",
+    "bar_": r"\bar",
+    "vec_": r"\vec",
+    "ddot_": r"\ddot",
+    "dot_": r"\dot",
+    "check_": r"\check",
+    "breve_": r"\breve",
+    "overline": r"\overline",
+    "bar": r"\bar",
+}
+
+_EXTRA_DECORATION_PREFIXES = {
+    "overleftrightarrow_": r"\overleftrightarrow",
+    "overrightarrow_": r"\overrightarrow",
+    "overleftarrow_": r"\overleftarrow",
+    "underbrace_": r"\underbrace",
+    "overbrace_": r"\overbrace",
+    "underbar_": r"\underbar",
+    "mathcal_": r"\mathcal",
+    "mathbb_": r"\mathbb",
+    "mathbf_": r"\mathbf",
+    "mathrm_": r"\mathrm",
+    "mathit_": r"\mathit",
+    "mathsf_": r"\mathsf",
+}
+
+
+def _strip_decorations(text, decorations_support=True):
+    decoration_prefixes = _DECORATION_PREFIXES
     if decorations_support:
-        decoration_prefixes = {
-            **decoration_prefixes,
-            "overleftrightarrow_": r"\overleftrightarrow",
-            "overrightarrow_": r"\overrightarrow",
-            "overleftarrow_": r"\overleftarrow",
-            "underbrace_": r"\underbrace",
-            "overbrace_": r"\overbrace",
-            "underbar_": r"\underbar",
-            "mathcal_": r"\mathcal",
-            "mathbb_": r"\mathbb",
-            "mathbf_": r"\mathbf",
-            "mathrm_": r"\mathrm",
-            "mathit_": r"\mathit",
-            "mathsf_": r"\mathsf",
-        }
-
+        decoration_prefixes = {**_DECORATION_PREFIXES, **_EXTRA_DECORATION_PREFIXES}
     decorations = []
     while text:
         matched = False
@@ -91,70 +84,100 @@ def _format_label_with_hi_low(
                 break
         if not matched:
             break
+    return text, decorations
 
-    def split_explicit_indices(raw: str) -> tuple[str, list[str], list[str]]:
-        first_hi = raw.find("_hi_")
-        first_low = raw.find("_low_")
-        starts = [i for i in (first_hi, first_low) if i != -1]
-        if not starts:
-            return raw, [], []
 
-        split_at = min(starts)
-        remaining = raw[:split_at]
-        suffix = raw[split_at:]
+def _split_explicit_indices(raw: str) -> tuple[str, list[str], list[str]]:
+    first_hi = raw.find("_hi_")
+    first_low = raw.find("_low_")
+    starts = [i for i in (first_hi, first_low) if i != -1]
+    if not starts:
+        return raw, [], []
 
-        superscripts = []
-        subscripts = []
-        active = None
+    split_at = min(starts)
+    remaining = raw[:split_at]
+    suffix = raw[split_at:]
 
-        for piece in suffix.split("_"):
-            if not piece:
-                continue
-            if piece == "hi":
-                active = superscripts
-            elif piece == "low":
-                active = subscripts
-            elif active is not None:
-                active.append(piece)
+    superscripts = []
+    subscripts = []
+    active = None
 
-        return remaining, superscripts, subscripts
+    for piece in suffix.split("_"):
+        if not piece:
+            continue
+        if piece == "hi":
+            active = superscripts
+        elif piece == "low":
+            active = subscripts
+        elif active is not None:
+            active.append(piece)
 
-    def split_implicit_indices(raw: str) -> tuple[str, list[str], list[str]]:
-        first_underscore = raw.find("_")
-        if first_underscore == -1:
-            return raw, [], []
+    return remaining, superscripts, subscripts
 
-        base = raw[:first_underscore]
-        tail = raw[first_underscore:]
+def _split_implicit_indices(raw: str) -> tuple[str, list[str], list[str]]:
+    first_underscore = raw.find("_")
+    if first_underscore == -1:
+        return raw, [], []
 
-        superscripts = []
-        subscripts = []
-        pos = 0
-        tail_len = len(tail)
+    base = raw[:first_underscore]
+    tail = raw[first_underscore:]
 
-        while pos < tail_len:
-            if tail[pos] != "_":
-                break
+    superscripts = []
+    subscripts = []
+    pos = 0
+    tail_len = len(tail)
 
-            run_start = pos
-            while pos < tail_len and tail[pos] == "_":
-                pos += 1
-            underscore_count = pos - run_start
+    while pos < tail_len:
+        if tail[pos] != "_":
+            break
 
-            word_start = pos
-            while pos < tail_len and tail[pos] != "_":
-                pos += 1
-            word = tail[word_start:pos]
+        run_start = pos
+        while pos < tail_len and tail[pos] == "_":
+            pos += 1
+        underscore_count = pos - run_start
 
-            if not word:
-                continue
+        word_start = pos
+        while pos < tail_len and tail[pos] != "_":
+            pos += 1
+        word = tail[word_start:pos]
 
-            if underscore_count >= 2:
-                superscripts.append(word)
-            else:
-                subscripts.append(word)
+        if not word:
+            continue
 
-        return base, superscripts, subscripts
+        if underscore_count >= 2:
+            superscripts.append(word)
+        else:
+            subscripts.append(word)
+
+    return base, superscripts, subscripts
+
+
+def label_indices(label, decorations_support=True):
+    text, _ = _strip_conjugation_prefix(str(label))
+    text, _ = _strip_decorations(text, decorations_support)
+    text, explicit_superscripts, explicit_subscripts = _split_explicit_indices(text)
+    base, inline_superscripts, inline_subscripts = _split_implicit_indices(text)
+    return (
+        base,
+        inline_superscripts + explicit_superscripts,
+        inline_subscripts + explicit_subscripts,
+    )
+
+
+def _format_label_with_hi_low(
+    label: str,
+    infer_suffix: bool = False,
+    prime_processing: bool = True,
+    decorations_support: bool = True,
+) -> str:
+    if not label:
+        return label
+
+    text = str(label)
+
+    text, is_conjugate = _strip_conjugation_prefix(text)
+
+    text, decorations = _strip_decorations(text, decorations_support)
 
     def format_superscripts(items: list[str]) -> str:
         if not items:
@@ -174,8 +197,8 @@ def _format_label_with_hi_low(
             return prime_tex + ("," if prime_tex else "") + ",".join(items)
         return prime_tex
 
-    text, explicit_superscripts, explicit_subscripts = split_explicit_indices(text)
-    base_part, inline_superscripts, inline_subscripts = split_implicit_indices(text)
+    text, explicit_superscripts, explicit_subscripts = _split_explicit_indices(text)
+    base_part, inline_superscripts, inline_subscripts = _split_implicit_indices(text)
 
     def format_suffix(word: str) -> str:
         if word == "negative":

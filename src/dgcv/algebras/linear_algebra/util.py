@@ -262,7 +262,8 @@ class linear_representation(dgcv_class):
         assert query_dgcv_categories(
             hom.codomain, {"endomorphism_space", "tensor_proxy"}
         )
-        skew = getattr(hom.domain, "is_skew_symmetric", False)
+        skew_check = getattr(hom.domain, "is_skew_symmetric", None)
+        skew = bool(skew_check()) if callable(skew_check) else False
         amb_dim = hom.domain.dimension + hom.codomain.domain.dimension
         dom_dim = hom.domain.dimension
         anti = None

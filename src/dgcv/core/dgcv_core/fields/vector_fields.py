@@ -514,7 +514,7 @@ class vector_field_class(tensor_field_class):
             sys = k[2]
 
             vs = self._variable_spaces.get(sys)
-            if not isinstance(vs, tuple):
+            if not isinstance(vs, tuple | dict):
                 continue
 
             v = vs[idx]

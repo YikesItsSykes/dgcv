@@ -58,6 +58,10 @@ baseline_defaults: Dict[str, Any] = {
     "extra_support_for_math_in_tables": False,
     "conjugation_prefix": "BAR",
     "_solve_default": "solve",
+    "_curate_solve_format": False,
+    "_creator_label_collision_check": False,
+    "_conjugate_registered_variables": False,
+    "_conjugate_standard_symbols": False,
     "forgo_CAS_provenance_pruning": False,
     "forgo_builtin_probabilistic_shortcuts": False,
     "basis_minting": "always",
@@ -68,7 +72,7 @@ baseline_defaults: Dict[str, Any] = {
 changes: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("0.2.6", {"theme": "appalachian"}),
     ("0.3.0", {"theme": "graph_paper", "verbose_label_printing": False}),
-    ("0.3.3", {"_solve_default": "auto"}),
+    ("0.3.3", {"_solve_default": "auto", "_curate_solve_format": True}),
     (
         "0.3.13",
         {
@@ -81,6 +85,14 @@ changes: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("0.4.36", {"default_symbolic_engine": _infer_engine}),
     ("0.5.0", {"default_symbolic_engine": "builtin"}),
     ("0.6.1", {"basis_minting": "auto", "_exceptional_cartan_basis": "coweights"}),
+    (
+        "0.6.2",
+        {
+            "_creator_label_collision_check": True,
+            "_conjugate_registered_variables": True,
+            "_conjugate_standard_symbols": True,
+        },
+    ),
 )
 
 

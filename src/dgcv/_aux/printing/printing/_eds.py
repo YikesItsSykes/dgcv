@@ -1,6 +1,7 @@
 import numbers
+import re
 
-from ..._deprecated.dgcv_formatter import process_basis_label
+from ._string_processing import _format_label_with_hi_low
 from ..._utilities._config import get_dgcv_settings_registry
 
 
@@ -31,12 +32,17 @@ def ext_der_str(string, order):
 
 def bar_label_latex(label):
     base, conjugated = split_conjugation_prefix(label)
-    if conjugated:
-        to_print = process_basis_label(base)
-        if "_" in to_print:
-            return f"\\overline{{{to_print}".replace("_", "}^", 1)
-        return f"\\overline{{{to_print}}}"
-    return process_basis_label(label).replace("_", "^", 1)
+    match = re.search(r"(\d+)$", base)
+    if match and "_" not in base:
+        base = base[: match.start(1)] + "__" + match.group(1)
+    tex = _format_label_with_hi_low(base)
+    if not conjugated:
+        return tex
+    cuts = [i for i in (tex.find("^"), tex.find("_")) if i != -1]
+    if cuts:
+        idx = min(cuts)
+        return f"\\overline{{{tex[:idx]}}}{tex[idx:]}"
+    return f"\\overline{{{tex}}}"
 
 
 def ordinal_latex(count):

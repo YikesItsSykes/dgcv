@@ -871,12 +871,12 @@ class _algebra_methods(_vector_space_methods):
         """
         return identify_real_form(
             self,
-            assume_simple=False,
-            assume_real=False,
-            assume_Lie_algebra=False,
-            certify_centroid=None,
-            tier2=False,
-            _use_cache=True,
+            assume_simple=assume_simple,
+            assume_real=assume_real,
+            assume_Lie_algebra=assume_Lie_algebra,
+            certify_centroid=certify_centroid,
+            tier2=tier2,
+            _use_cache=_use_cache,
         )
 
     def summary(

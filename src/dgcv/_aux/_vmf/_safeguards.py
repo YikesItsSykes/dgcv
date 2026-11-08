@@ -148,108 +148,173 @@ def protected_caller_globals():
     }
 
 
-def validate_label_list(basis_labels):
+_BRANCH_NAMES = {
+    "standard_variable_systems": "standard coordinate",
+    "complex_variable_systems": "complex coordinate",
+    "finite_algebra_systems": "finite-dimensional algebra",
+    "eds_atoms": "differential form",
+    "eds_coframes": "coframe",
+    "eds_frames": "frame",
+    "eds_jet_spaces": "jet space",
+}
+
+
+def _branch_of(path):
+    if not isinstance(path, (tuple, list)) or not path:
+        return None
+    if path[0] == "eds":
+        return f"eds_{path[2]}" if len(path) > 2 else "eds"
+    return path[0]
+
+
+def _path_of(entry):
+    p = entry.get("path") if isinstance(entry, dict) else None
+    return p if isinstance(p, tuple) and len(p) > 1 else None
+
+
+def _owners(label, vr):
+    owners = set()
+    p = _path_of(vr["paths"].get(label))
+    if p is not None and p[1] != label:
+        owners.add(p[1])
+    for system_label, meta in vr["_labels"].items():
+        if system_label != label and label in meta.get("children", ()):
+            owners.add(system_label)
+    for system_label, info in vr.get("eds", {}).get("coframes", {}).items():
+        if info.get("cousins_parent") == label:
+            owners.add(system_label)
+    return owners
+
+
+def _cleared_by(system_label, vr, seen):
+    if system_label in seen:
+        return seen
+    seen.add(system_label)
+    meta = vr["_labels"].get(system_label, {})
+    seen.update(meta.get("children", ()))
+    for name, entry in vr["paths"].items():
+        p = _path_of(entry)
+        if p is not None and p[1] == system_label:
+            seen.add(name)
+    if _branch_of(meta.get("path")) == "eds_coframes":
+        info = vr["eds"]["coframes"].get(system_label, {})
+        for child in list(meta.get("children", ())) + [
+            info.get("cousins_parent"),
+            info.get("frame_label"),
+        ]:
+            if child is not None and child in vr["_labels"]:
+                _cleared_by(child, vr, seen)
+    if _branch_of(meta.get("path")) == "eds_jet_spaces":
+        for child in meta.get("children", ()):
+            if child in vr["_labels"]:
+                _cleared_by(child, vr, seen)
+    return seen
+
+
+def _kind_name(system_label, vr):
+    meta = vr["_labels"].get(system_label, {})
+    return _BRANCH_NAMES.get(_branch_of(meta.get("path")), "registered")
+
+
+def validate_label_list(basis_labels, *, kind=None, system_labels=()):
     """
-    Validates a list of basis labels by checking if they are already present in active namespace.
+    Checks a list of labels against the dgcv Variable Management Framework (its `paths`, `_labels` and
+    system dictionaries; the working namespace is not consulted). A label in `system_labels` that is
+    currently a system label of a branch in `kind` and belongs to no other system is left to the caller,
+    which replaces it; every other registered label consults `ask_before_overwriting_objects_in_vmf`.
 
     Parameters
     ----------
     basis_labels : list of str
-        The list of basis labels to validate.
+        The labels to validate.
+    kind : str or iterable of str, optional
+        The registry branches the caller creates (`standard_variable_systems`, `complex_variable_systems`,
+        `finite_algebra_systems`, `eds_atoms`, `eds_coframes`).
+    system_labels : iterable of str, optional
+        The labels the caller registers as system labels.
     """
+    vr = get_variable_registry()
+    kinds = {kind} if isinstance(kind, str) else set(kind or ())
+    replaced = set()
+    for label in system_labels:
+        meta = vr["_labels"].get(label)
+        if (
+            meta is not None
+            and _branch_of(meta.get("path")) in kinds
+            and not _owners(label, vr)
+        ):
+            replaced.add(label)
+    freed = set()
+    for label in replaced:
+        _cleared_by(label, vr, freed)
+
+    permitted = (
+        get_dgcv_settings_registry()["ask_before_overwriting_objects_in_vmf"] is False
+    )
     existing_labels = []
     to_clear = []
     detailed_message = ""
-    if get_dgcv_settings_registry()["ask_before_overwriting_objects_in_vmf"] is False:
-        overwritePermissionGranted = True
-    else:
-        overwritePermissionGranted = False
-
-    namespace = working_namespace()
-    variable_registry = get_variable_registry()
     for label in basis_labels:
-        if label in namespace:
-            existing_labels.append(label)
-            for system_type, sub_type, system_type_name, family_names_address in [
-                (
-                    "standard_variable_systems",
-                    "",
-                    "standard coordinate",
-                    "variable_relatives",
-                ),
-                (
-                    "complex_variable_systems",
-                    "",
-                    "complex coordinate",
-                    "variable_relatives",
-                ),
-                (
-                    "finite_algebra_systems",
-                    "",
-                    "finite-dimensional algebra",
-                    "family_names",
-                ),
-                ("eds", "atoms", "atomic differential forms", "family_relatives"),
-                ("eds", "coframes", "exterior differential", "children"),
-            ]:
-                if system_type in variable_registry:
-                    if sub_type != "" and sub_type in variable_registry[system_type]:
-                        innerVR = variable_registry[system_type][sub_type]
-                    else:
-                        innerVR = variable_registry[system_type]
-                    if label in innerVR:
-                        if overwritePermissionGranted is True:
-                            detailed_message += (
-                                f"\n •Label'{label}' was already assigned as the label for a {system_type_name} system.\n"
-                                rf"    The old object (and all of its dependant relatives) was deleted from the VMF (and "
-                                f"the global namespace) to resolve the environment for re-assignments."
-                            )
-                            to_clear.append(label)
-                        else:
-                            detailed_message += (
-                                f"\n`validate_basis_labels` detected '{label}' within the dgcv Variable Management Framework "
-                                f"assigned as the label for a {system_type_name} system.\n"
-                                f"Apply the dgcv function `clearVar('{label}')` to clear the obstructing objects."
-                            )
-                    else:
-                        for parent_label, parent_data in innerVR.items():
-                            if (
-                                family_names_address in parent_data
-                                and label in parent_data[family_names_address]
-                            ):
-                                if overwritePermissionGranted is True:
-                                    detailed_message += (
-                                        f"\n • Label '{label}' was already assigned as the label for an object in a {system_type_name} system.\n"
-                                        r"    The old object (and all of its dependant relatives) was deleted from the "
-                                        f"VMF (and the global namespace) to resolve the environment for re-assignments. "
-                                    )
-                                    to_clear.append(parent_label)
-                                else:
-                                    detailed_message += (
-                                        f"\n`validate_basis_labels` detected '{label}' within the dgcv Variable Management Framework "
-                                        f"associated with the {system_type_name} system '{parent_label}'.\n Apply"
-                                        f"the dgcv function `clearVar('{parent_label}')` to first clear the obstructing objects."
-                                    )
+        if label is None or label in freed:
+            continue
+        is_system = label in vr["_labels"]
+        owners = _owners(label, vr)
+        if not is_system and not owners:
+            continue
+        existing_labels.append(label)
+        if not owners:
+            system_type_name = _kind_name(label, vr)
+            if permitted:
+                detailed_message += (
+                    f"\n • Label '{label}' was already assigned as the label for a {system_type_name} system.\n"
+                    "    The old object (and all of its dependant relatives) was deleted from the VMF (and "
+                    "the global namespace) to resolve the environment for re-assignments."
+                )
+                to_clear.append(label)
+            else:
+                detailed_message += (
+                    f"\n`validate_label_list` detected '{label}' within the dgcv Variable Management Framework "
+                    f"assigned as the label for a {system_type_name} system.\n"
+                    f"Apply the dgcv function `clearVar('{label}')` to clear the obstructing objects."
+                )
+            continue
+        roots = sorted(o for o in owners if not (_owners(o, vr) & owners))
+        for parent_label in roots:
+            system_type_name = _kind_name(parent_label, vr)
+            if permitted:
+                detailed_message += (
+                    f"\n • Label '{label}' was already assigned as the label for an object in a {system_type_name} system.\n"
+                    "    The old object (and all of its dependant relatives) was deleted from the "
+                    "VMF (and the global namespace) to resolve the environment for re-assignments. "
+                )
+                to_clear.append(parent_label)
+            else:
+                detailed_message += (
+                    f"\n`validate_label_list` detected '{label}' within the dgcv Variable Management Framework "
+                    f"associated with the {system_type_name} system '{parent_label}'.\n Apply "
+                    f"the dgcv function `clearVar('{parent_label}')` to first clear the obstructing objects."
+                )
 
     if len(existing_labels) > 0:
-        if overwritePermissionGranted is True:
+        if permitted:
             warning_message = (
-                f"The following basis labels were already defined in the current namespace: {existing_labels}. "
+                f"The following labels were already registered in the dgcv Variable Management Framework: {existing_labels}. "
                 "The setting from `set_dgcv_settings(ask_before_overwriting_objects_in_vmf=False)` is active in the current session, so "
                 "these previously used labels have been re-assigned to new objects."
             )
         else:
             warning_message = (
-                f"Warning: The following basis labels are already defined in the current namespace: {existing_labels}. "
-                "By default, `dgcv` creator functions will not overwrite such objects.  Either clear them from the "
-                " global namespace before attempting label re-assignment or set the over-riding setting "
-                "`set_dgcv_settings(ask_before_overwriting_objects_in_vmf=True)`."
+                f"Warning: The following labels are already registered in the dgcv Variable Management Framework: {existing_labels}. "
+                "By default, `dgcv` creator functions will not overwrite such objects. Either clear them with `clearVar` "
+                "before attempting label re-assignment or set the over-riding setting "
+                "`set_dgcv_settings(ask_before_overwriting_objects_in_vmf=False)`."
             )
 
         if detailed_message:
             warning_message += detailed_message
 
-        if overwritePermissionGranted is True:
+        if permitted:
+            to_clear = list(dict.fromkeys(to_clear))
             if get_dgcv_settings_registry()["forgo_warnings"] is not True:
                 dgcv_warning(
                     warning_message
@@ -260,6 +325,29 @@ def validate_label_list(basis_labels):
                 clearVar(*to_clear, report=False)
         else:
             raise ValueError(warning_message)
+
+
+def creator_label_check_enabled():
+    return (
+        get_dgcv_settings_registry().get("_creator_label_collision_check", True)
+        is not False
+    )
+
+
+def validate_creator_labels(kind, system_labels, member_labels=()):
+    """
+    The creator contract (own label replaces, foreign label consults) behind the versioned setting
+    `_creator_label_collision_check`; see `validate_label_list`.
+    """
+    if not creator_label_check_enabled():
+        return
+    system_labels = tuple(label for label in system_labels if label is not None)
+    labels = list(system_labels) + [
+        label for label in member_labels if label is not None
+    ]
+    validate_label_list(
+        list(dict.fromkeys(labels)), kind=kind, system_labels=system_labels
+    )
 
 
 def validate_label(label, remove_guardrails=False):

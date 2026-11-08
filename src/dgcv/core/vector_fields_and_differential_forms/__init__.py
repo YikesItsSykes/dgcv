@@ -24,7 +24,7 @@ from .cartan import (
     interiorProduct,
     makeZeroForm,
 )
-from .coframes import get_coframe
+from .coframes import get_coframe, get_frame
 from .complex_assembly import (
     assembleFromAntiholVFC,
     assembleFromCompVFC,
@@ -54,6 +54,7 @@ __all__ = [
     "get_DF",
     "get_VF",
     "get_coframe",
+    "get_frame",
     "interiorProduct",
     "makeZeroForm",
 ]

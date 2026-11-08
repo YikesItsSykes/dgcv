@@ -35,6 +35,30 @@ ASSUMPTION_NAMES = frozenset(
         "constant",
     }
 )
+NON_INHERITED_MARKERS = frozenset(
+    {"positive", "negative", "nonnegative", "nonpositive", "nonzero", "integer"}
+)
+REAL_IMPLYING_ASSUMPTIONS = frozenset(
+    {"positive", "negative", "nonnegative", "nonpositive", "integer"}
+)
+
+
+def parse_assumptions(assumptions):
+    if assumptions is None:
+        return {}
+    if isinstance(assumptions, str):
+        declared = {assumptions: True}
+    elif isinstance(assumptions, dict):
+        declared = dict(assumptions)
+    else:
+        declared = dict.fromkeys(assumptions, True)
+    for name, value in declared.items():
+        if name not in ASSUMPTION_NAMES or not isinstance(value, bool):
+            raise ValueError(
+                f"unknown assumption {name!r}; the accepted names are "
+                f"{', '.join(sorted(ASSUMPTION_NAMES))}, each mapped to True or False"
+            )
+    return declared
 CONJUGATE_ROLE = {
     "holomorphic": "antiholomorphic",
     "antiholomorphic": "holomorphic",

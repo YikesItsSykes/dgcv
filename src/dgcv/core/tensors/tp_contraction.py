@@ -1,4 +1,5 @@
 from ..._aux._vmf._safeguards import get_dgcv_category
+from ._protocol import _is_vs_element
 
 
 class _tp_contraction:
@@ -33,11 +34,11 @@ class _tp_contraction:
 
         if (
             get_dgcv_category(other) == "subalgebra_element"
-            and other.algebra != self.vector_space
+            and other.vectorSpace != self.vector_space
         ):
             other = other.ambient_rep
 
-        elif hasattr(other, "algebra") and self.vector_space == other.algebra:
+        elif _is_vs_element(other) and self.vector_space == other.vectorSpace:
             if self.trailing_valence != 0:
                 raise ValueError(
                     f"Operating on algebra_element requires all terms in self to end in covariant tensor factor. Recieved self: {self} and other: {other}"

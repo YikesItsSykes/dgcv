@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from ..._aux._backends._calculus import diff
 from ..._aux._backends._symbolic_router import _scalar_is_zero, get_free_symbols, subs
-from ..._aux._backends._types_and_constants import is_atomic, symbol
+from ..._aux._backends._types_and_constants import (
+    _disposable_symbols,
+    is_atomic,
+    symbol,
+)
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._utilities._misc import linear_combination
 from ..._aux._vmf._safeguards import create_key, retrieve_passkey
@@ -422,13 +426,10 @@ def decompose(
                 return_created_object=True,
             )[0]
             params = tuple(params)
+        elif isinstance(new_parameters_label, str) and new_parameters_label:
+            params = tuple(symbol(f"{new_parameters_label}{i}") for i in range(len(free)))
         else:
-            plabel = (
-                new_parameters_label
-                if isinstance(new_parameters_label, str) and new_parameters_label
-                else create_key(prefix="param")
-            )
-            params = tuple(symbol(f"{plabel}{i}") for i in range(len(free)))
+            params = tuple(_disposable_symbols(create_key(prefix="param"), len(free)))
 
         subs_dict = {v: p for v, p in zip(free, params)}
         decomp_coeffs = [subs(c, subs_dict) for c in decomp_coeffs]
@@ -458,7 +459,7 @@ def _decompose_over_number_field(
     for elem in basis:
         free_symbols |= get_free_symbols(elem)
     vlabel = create_key("var")
-    variables = [symbol(f"{vlabel}_{idx}") for idx in range(dim)]
+    variables = _disposable_symbols(f"{vlabel}_", dim)
     general_combination = sum(var * elem for var, elem in zip(variables, basis))
     eqns = obj - general_combination
 
