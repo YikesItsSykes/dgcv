@@ -327,6 +327,7 @@ dgcv_settings_registry = {
     "_creator_label_collision_check": True,
     "_conjugate_registered_variables": True,
     "_conjugate_standard_symbols": True,
+    "_semicolon_derivative_indices": True,
     "_exceptional_cartan_basis": "coweights",
     "__": dict(),
 }

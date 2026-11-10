@@ -27,6 +27,7 @@ from ..._aux._utilities._config import latex_in_html
 from ..._aux._utilities._styles import get_style
 from ..._aux.printing._tables import panel_view
 from ..._aux.printing.printing._dgcv_display import LaTeX, show
+from ._functions import fixed_functions_line, locus_text
 from ._panels import (
     _corners,
     _header_block,
@@ -47,6 +48,26 @@ def equations_text(equations):
     return "{" + ", ".join(f"{F} = 0" for F in equations) + "}"
 
 
+def _plain_equation(*sides):
+    return " = ".join(str(side) for side in sides)
+
+
+def _html_math(x):
+    return html.escape(str(x))
+
+
+def _html_equation(*sides):
+    return html.escape(_plain_equation(*sides))
+
+
+def _tex_math(x):
+    return f"${_routed_latex(x)}$"
+
+
+def _tex_equation(*sides):
+    return "$" + " = ".join(_routed_latex(side) for side in sides) + "$"
+
+
 def _jet_dimension(n, m, k):
     return n + m * sum(comb(n + length - 1, length) for length in range(k + 1))
 
@@ -55,7 +76,7 @@ def _join(items, math):
     return ", ".join(math(item) for item in items) if items else "none"
 
 
-def _sections(data, math, use_latex):
+def _sections(data, math, equation, use_latex):
     n, m, k = data.signature
     derivatives = sorted(
         ((atom, key) for atom, key in data.derivatives.items() if key[1]),
@@ -72,6 +93,10 @@ def _sections(data, math, use_latex):
         f"unknown functions: {_join(data.dependent_variables, math)}",
         "derivatives: " + _join([atom for atom, _ in derivatives], math),
     ]
+    if data.fixed_functions:
+        first.append(
+            fixed_functions_line(data.fixed_functions, use_latex, str if math is str else html.escape)
+        )
     if lone:
         first.append("holomorphic directions: " + _join([key for key in lone if key in data.coframe.forms], math))
     if pairs:
@@ -86,9 +111,14 @@ def _sections(data, math, use_latex):
             else f"jet space: J^{k}({n}, {m}), dimension {_jet_dimension(n, m, k)}"
         ),
     ]
+    independent = [
+        value
+        for value in (data.coframe.potentials.get(form) for form in data.coframe.forms)
+        if value is not None
+    ]
     second = [
         f"from {_source_labels.get(source, source)}: "
-        + "; ".join(" = ".join(math(c) for c in locus) + " = 0" for locus in loci)
+        + "; ".join(locus_text(locus, independent, equation) for locus in loci)
         for source, loci in data.singularities().items()
     ]
     return first, second
@@ -100,7 +130,7 @@ _source_labels = dict(singularity_sources)
 
 def _plain(data):
     width = max(len(f" {t} ") for t in _titles)
-    first, second = _sections(data, str, False)
+    first, second = _sections(data, str, _plain_equation, False)
     lines = [_header_block(_titles[0], width), "• " + equations_text(data.equations)]
     lines += [f"• {item}" for item in first]
     if second:
@@ -117,8 +147,8 @@ def _rich(data, use_latex, style_key, extra_support):
         "plaque_border": "--plaque-border" in theme_data.custom_css_vars,
         "plaque_content": True,
     }
-    math = (lambda x: f"${_routed_latex(x)}$") if use_latex else (lambda x: html.escape(str(x)))
-    first, second = _sections(data, math, use_latex)
+    math, equation = (_tex_math, _tex_equation) if use_latex else (_html_math, _html_equation)
+    first, second = _sections(data, math, equation, use_latex)
     equations = (
         f"${equations_tex(data.equations)}$" if use_latex else html.escape(equations_text(data.equations))
     )

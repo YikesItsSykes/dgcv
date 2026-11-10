@@ -72,6 +72,30 @@ def _subs(value, rules):
     return _routed_subs(value, rules)
 
 
+class _point_values(dict):
+    def __init__(self, coordinates, partials=None, given=None):
+        super().__init__(coordinates)
+        self.coordinates = dict(coordinates)
+        self.partials = dict(partials or {})
+        self.given = dict(given or {})
+        self.key = frozenset(self.coordinates.items()) | frozenset(self.given.items())
+
+
+def _point_key(at):
+    if at is None:
+        return None
+    key = getattr(at, "key", None)
+    return frozenset(at.items()) if key is None else key
+
+
+def _at_point(value, at):
+    value = _subs(value, getattr(at, "coordinates", at))
+    partials = getattr(at, "partials", None)
+    if partials:
+        value = _subs(value, partials)
+    return value
+
+
 def _translated(condition, rules):
     try:
         return _subs(condition, rules)
@@ -163,6 +187,16 @@ def _chain_simplifier():
             return _fast_simplify(value)
 
     return simplify_entry
+
+
+def _cancel_generators(value):
+    if not hasattr(value, "atoms"):
+        return None
+    sp = engine_module()
+    heads = value.atoms(sp.Function)
+    if heads:
+        value = value.xreplace({head: sp.Integer(1) for head in heads})
+    return len(heads) + len(value.free_symbols)
 
 
 def _rank(matrix):

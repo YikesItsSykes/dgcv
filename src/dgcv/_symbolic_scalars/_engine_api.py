@@ -93,6 +93,7 @@ dgcv_capabilities = {
     "linear_form": linear_form,
     "primitive_factors": primitive_factors,
     "function_head": FunctionHead,
+    "function_occurrences": _bindings.function_occurrences,
     "generic_constants": GenericConstants,
     "exact_nonzero": _bindings.exact_nonzero,
     "scalars_equal": _bindings.scalars_equal,

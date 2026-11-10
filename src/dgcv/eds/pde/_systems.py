@@ -33,6 +33,7 @@ from .._bridges import _is_number
 from .._calculus import _atoms_in
 from .._coframes import abstract_coframe
 from .._zero_forms import zero_form_class
+from ._functions import function_name, read_functions
 from ._report import _Report
 from ._summary import equations_tex, equations_text, pde_summary
 
@@ -292,6 +293,7 @@ class pde_system_data(_Report):
     order: int
     derivatives: dict
     conjugates: dict = field(default_factory=dict)
+    fixed_functions: tuple = ()
     _cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def singularities(self):
@@ -363,11 +365,21 @@ def pde_system(equations, *, dependent=None, parameters=None, coframe=None):
     coframe = _derivative_coframe(derivatives, coframe)
     _check_holonomic(coframe)
     directions = _directions(coframe)
-    declared = frozenset(_atom(value, "parameters") for value in _as_list(parameters))
+    declared = frozenset(
+        _atom(value, "parameters")
+        for value in _as_list(parameters)
+        if function_name(value) is None
+    )
     primitives, forced = {}, []
     for atom in derivatives:
         primitives.setdefault(atom.label, _primitive(atom, found))
     for value in _as_list(dependent):
+        name = function_name(value)
+        if name is not None:
+            raise TypeError(
+                f"{name} is a function_dgcv, which a system reads as a fixed function; an unknown "
+                "function is a zero-form atom (createZeroForm)"
+            )
         atom = _atom(value, "dependent")
         if atom.differential_order:
             raise TypeError("`dependent` names the unknown functions themselves, not their derivatives")
@@ -405,6 +417,17 @@ def pde_system(equations, *, dependent=None, parameters=None, coframe=None):
         if isinstance(conj, zero_form_atom) and conj.label != atom.label and conj.label in parameter_labels:
             conjugates[atom] = parameter_labels[conj.label]
     conjugates = directions.conjugates() | conjugates
+    potentials = [coframe.potentials.get(form) for form in coframe.forms]
+    functions, _ = read_functions(
+        equations,
+        [
+            value
+            for i, value in enumerate(potentials)
+            if value is not None and i not in directions.pairs and i not in directions.lone
+        ],
+        lambda s: isinstance(s, zero_form_atom)
+        and (s.differential_order > 0 or s.label in unknown_labels),
+    )
     position = {atom.label: i for i, atom in enumerate(dependents, 1)}
     index = {atom: (position[atom.label], ()) for atom in dependents}
     for atom in derivatives:
@@ -417,4 +440,5 @@ def pde_system(equations, *, dependent=None, parameters=None, coframe=None):
         max(atom.differential_order for atom in derivatives),
         index,
         conjugates,
+        tuple(entry[0] for entry in functions.values()),
     )

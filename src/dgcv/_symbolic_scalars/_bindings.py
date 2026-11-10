@@ -434,6 +434,42 @@ def scalars_equal(a, b):
     return nf_from_base(a).equal(nf_from_base(b))
 
 
+def _argument_value(base):
+    if isinstance(base, (zero_form_atom, numbers.Number)):
+        return base
+    return zero_form_class(base)
+
+
+def function_occurrences(expr):
+    found = {}
+
+    def walk(rf):
+        for g in rf.gens():
+            leaf = _poly.gen_leaf(g)
+            if isinstance(leaf, OpaqueLeaf):
+                walk(nf_from_base(leaf.base))
+            elif isinstance(leaf, _CompoundLeaf):
+                if isinstance(leaf, _functions.FunctionAtom) and leaf not in found:
+                    found[leaf] = (
+                        zero_form_class(leaf),
+                        leaf.label_base,
+                        tuple(_argument_value(a) for a in leaf.args),
+                        leaf.derivs,
+                        zero_form_class(
+                            _functions.FunctionAtom(
+                                leaf.label_base, leaf.args, None, leaf._markers
+                            )
+                        ),
+                    )
+                for arg in leaf.args:
+                    walk(nf_from_base(arg))
+
+    walk(nf_from_base(expr))
+    return sorted(
+        found.values(), key=lambda e: (e[1], sum(e[3]), e[3], str(e[2]))
+    )
+
+
 def to_sympy(base):
     sp = sympy_module_if_available()
     if sp is None:

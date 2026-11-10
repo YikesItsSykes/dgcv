@@ -127,6 +127,16 @@ class _coefficient_mapped:
         return self._induce_method_from_descending("denom", **kwargs)
 
 
+def _unit_sign(coeff):
+    if isinstance(coeff, (zero_form_atom, zero_form_class)):
+        if coeff.is_one:
+            return ""
+        return "-" if (-1 * coeff).is_one else None
+    if _scalar_is_one(coeff):
+        return ""
+    return "-" if _scalar_is_minus_one(coeff) else None
+
+
 def _check_wedge_forms(forms):
     for form in forms:
         if not isinstance(form, abstract_differential_form_atom) or form.degree == 0:
@@ -1230,6 +1240,9 @@ class abstract_differential_form_monomial(_coefficient_mapped, dgcv_class):
             coeff_str = str(coeff0)
         # Join the other factors using '*'
         if len(self.factors_sorted) > 1:
+            sign = _unit_sign(coeff_inner)
+            if sign is not None:
+                coeff_str = sign
             factors_str = "*".join(str(factor) for factor in self.factors_sorted[1:])
 
             # Combine coefficient and factors, but omit '*' if coeff_str is empty or "-"

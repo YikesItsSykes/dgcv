@@ -21,9 +21,12 @@ SPDX-License-Identifier: Apache-2.0
 import numbers
 import random
 
+from ..._aux._backends._calculus import diff
 from ..._aux._backends._display import latex as _routed_latex
-from ..._aux._backends._symbolic_router import _scalar_is_zero
+from ..._aux._backends._engine import engine_kind
+from ..._aux._backends._symbolic_router import _scalar_is_zero, function_occurrences
 from ..._aux._backends._symbolic_router import subs as _routed_subs
+from ..._aux._backends._types_and_constants import symbol
 from ..._aux._utilities._config import dgcv_warning
 from ..._aux._vmf._safeguards import (
     get_dgcv_category,
@@ -36,14 +39,25 @@ from ...core.base import dgcv_class
 from ...core.conversions.conversions import holToReal, realToSym, symToHol, symToReal
 from ...core.solvers import solve_dgcv
 from .. import _bridges
-from .._calculus import _conjugate_closure
+from .._atoms import zero_form_atom
+from .._calculus import _atoms_in, _conjugate_closure
 from .._coframes import abstract_coframe
 from .._forms import (
     abstract_differential_form,
     abstract_differential_form_atom,
     abstract_differential_form_monomial,
 )
+from .._zero_forms import zero_form_class
 from ..eds_operations import transform_coframe
+from ..pde._functions import (
+    _is_symbol,
+    function_name,
+    function_parts,
+    listed_names,
+    partial_text,
+    read_functions,
+    split_locus,
+)
 from ..pde._systems import _coordinate_kind, _equation_list, is_pde_input
 from ._chart import _is_complex_formula, _restrict_forms, _warn_on_divisors
 from ._coordinates import (
@@ -81,6 +95,7 @@ from ._sampling import (
     _locus_key,
     _polynomial_in,
     _pruned_loci,
+    _random_rational,
     _random_values,
     _rank_drop_loci,
     _sampling_tail,
@@ -95,11 +110,14 @@ from ._summary import (
 )
 from ._util import (
     _as_list,
+    _at_point,
     _dot,
     _form_is_zero,
     _free,
     _is_abstract,
     _is_vector,
+    _point_key,
+    _point_values,
     _rank,
     _subs,
     _symbols,
@@ -165,7 +183,7 @@ class _Chart:
     def structure_pairs(self, form, at=None):
         for (fi, fj, _), value in self.coframe.coefficients(of=form).items():
             if fi in self.complementary_position and fj in self.complementary_position:
-                yield self.complementary_position[fi], self.complementary_position[fj], _subs(value, at)
+                yield self.complementary_position[fi], self.complementary_position[fj], _at_point(value, at)
 
 
 class PfaffSystem(dgcv_class):
@@ -190,7 +208,14 @@ class PfaffSystem(dgcv_class):
         self._pde = None
         self._pde_inverse = {}
         self._coordinate_tex = {}
+        self._coordinate_parts = {}
+        self._jet_unknowns = frozenset()
+        self._complementary_coordinates = {}
         self._singularities = {}
+        self._independent_variables = ()
+        self._functions_cache = None
+        self._space = None
+        self._equation_source = None
         attach = None
         if get_dgcv_category(Pfaffian_forms) == "distribution":
             Pfaffian_forms = list(Pfaffian_forms.df_basis)
@@ -203,11 +228,11 @@ class PfaffSystem(dgcv_class):
             space = jetSpace.from_equations(
                 Pfaffian_forms, dependent=dependent, parameters=parameters, coframe=coframe
             )
-            Pfaffian_forms, coordinates, horizontal_forms, defining, divisors, _ = space._pfaff_inputs(
-                None, restrict
+            Pfaffian_forms, coordinates, horizontal_forms, defining, divisors, _, source = (
+                space._pfaff_inputs(None, restrict)
             )
             coframe, parameters, _objects = None, space.parameter_symbols, space._objects
-            attach = (defining, divisors, space)
+            attach = (defining, divisors, space, source)
         elif dependent is not None or restrict is not None:
             raise TypeError(
                 "`dependent` and `restrict` belong to a Pfaff system built from differential equations"
@@ -273,10 +298,40 @@ class PfaffSystem(dgcv_class):
         if attach is not None:
             self._attach_equations(*attach)
 
-    def _attach_equations(self, equations, divisors, space):
+    @property
+    def _functions(self):
+        if self._functions_cache is None:
+            independent = self._independent_variables
+            if not independent:
+                self._functions_cache = ({}, {})
+            else:
+                reality = self._reality
+                jets = set(self.coordinates) - set(independent)
+                self._functions_cache = read_functions(
+                    [
+                        *self.defining_equations,
+                        *(entry for row in self._rows for entry in row),
+                        *self._default.coframe.coefficients().values(),
+                    ],
+                    [x for x in independent if x not in reality.pairs and x not in reality.lone],
+                    jets.__contains__,
+                )
+        return self._functions_cache
+
+    @property
+    def fixed_functions(self):
+        return tuple(entry[0] for entry in self._functions[0].values())
+
+    def _attach_equations(self, equations, divisors, space, source=None, record=True):
         self.defining_equations = tuple(equations)
+        self._space = space
+        self._equation_source = source
+        self._independent_variables = tuple(space.x)
+        self._functions_cache = None
         self._coordinate_tex = dict(getattr(space, "coordinate_tex", None) or {})
-        if space.pde is not None:
+        self._coordinate_parts = dict((getattr(space, "_coordinate_parts", None) or ({}, {}))[0])
+        self._jet_unknowns = frozenset(space.u)
+        if record and space.pde is not None:
             self._pde = space.pde
             self._pde_inverse = {
                 coordinate: atom for atom, coordinate in space.jet_coordinate_rules.items()
@@ -291,6 +346,11 @@ class PfaffSystem(dgcv_class):
     def _record_singularities(self, source, loci):
         if not loci:
             return
+        if self._independent_variables:
+            loci = [
+                tuple(part for parts in split_locus(locus, self._independent_variables) for part in parts)
+                for locus in loci
+            ]
         known = self._singularities.setdefault(source, [])
         seen = {_locus_key(locus) for locus in known}
         fresh = [locus for locus in loci if _locus_key(locus) not in seen]
@@ -337,16 +397,26 @@ class PfaffSystem(dgcv_class):
             tries = min(tries, 1)
         roots_seen, non_real = False, []
         is_zero = _zero_test()
+        functions, occurring = self._functions
+        sampled = [
+            occurrence
+            for (key, _), occurrence in occurring.items()
+            if functions[key][3] and not any(arg in designated for arg in functions[key][2])
+        ]
         for _ in range(tries):
             values = _random_values(rng, bound, self.coordinates, pairs)
+            drawn = {occurrence: _random_rational(rng, bound) for occurrence in sampled}
             if not equations:
-                return values, "found", None
+                return values | drawn, "found", None
             fixed = {x: value for x, value in values.items() if x not in designated}
-            reduced = _equation_list_or_none([_subs(F, fixed) for F in equations], is_zero)
+            at = _point_values(
+                fixed, {_subs(occurrence, fixed): value for occurrence, value in drawn.items()}
+            )
+            reduced = _equation_list_or_none([_at_point(F, at) for F in equations], is_zero)
             if reduced is None:
                 continue
             if not reduced:
-                return fixed | {y: values[y] for y in designated}, "found", None
+                return fixed | {y: values[y] for y in designated} | drawn, "found", None
             try:
                 solutions = solve_dgcv(reduced, list(designated))
             except NotImplementedError as exc:
@@ -365,7 +435,7 @@ class PfaffSystem(dgcv_class):
                     continue
                 if pairs and not _conjugate_consistent(point, reality):
                     continue
-                accepted.append(point)
+                accepted.append(point | drawn)
             if accepted:
                 return rng.choice(accepted), "found", None
         if not roots_seen:
@@ -405,6 +475,10 @@ class PfaffSystem(dgcv_class):
         else:
             coframe = _rebased_coframe(source, names, images)
         count = len(subset)
+        if source is None:
+            self._complementary_coordinates.update(
+                zip(coframe.forms[count:], (columns[idx] for idx in rest))
+            )
         matrix = [self._rows[idx] for idx in subset] + [
             _unit(len(columns), idx) for idx in rest
         ]
@@ -413,7 +487,7 @@ class PfaffSystem(dgcv_class):
         )
 
     def _rows_at(self, at):
-        return [[_subs(entry, at) for entry in row] for row in self._rows]
+        return [[_at_point(entry, at) for entry in row] for row in self._rows]
 
     def _chosen_at(self, at):
         rows = self._rows_at(at)
@@ -430,7 +504,7 @@ class PfaffSystem(dgcv_class):
     def _local(self, at=None):
         if at is None:
             return self._default
-        key = frozenset(at.items())
+        key = _point_key(at)
         if key not in self._charts:
             self._charts[key] = self._chosen_at(at)
         return self._charts[key]
@@ -572,24 +646,38 @@ class PfaffSystem(dgcv_class):
         return self.coframe.dual()
 
     def _point(self, at):
-        if at is None:
-            return None
+        if at is None or isinstance(at, _point_values):
+            return at
         if not self.coordinates:
             raise TypeError(
                 "a point needs coordinates, and this system has none; "
                 "subs(system, rules) substitutes into its definition instead"
             )
-        at = dict(at)
-        ignored = [key for key in at if key not in self.coordinates]
+        given, at, partials, ignored = dict(at), {}, {}, []
+        functions = self._functions[0]
+        for key, value in given.items():
+            if key in self.coordinates:
+                at[key] = value
+                continue
+            parts = function_parts(key)
+            entry = None if parts is None else functions.get((parts[0], tuple(str(arg) for arg in parts[1])))
+            if entry is None:
+                ignored.append(key)
+            elif not entry[3]:
+                raise TypeError(
+                    "values in `at` are available for fixed functions of real or standard independent "
+                    f"variables only; {partial_text(*parts[:3])} is not one"
+                )
+            else:
+                partials[key] = (value, parts)
         if ignored:
             dgcv_warning(
-                f"ignored {len(ignored)} key(s) of `at` that are not coordinates of this system: "
-                + ", ".join(str(key) for key in ignored)
+                f"ignored {len(ignored)} key(s) of `at` that are neither coordinates of this system nor "
+                "derivatives of its fixed functions: "
+                + ", ".join(function_name(key) or str(key) for key in ignored)
                 + "; subs(system, rules) substitutes such symbols",
                 wc_label="dgcvImportantWarning",
             )
-            for key in ignored:
-                del at[key]
         if self._reality.closed:
             is_zero = _zero_test()
             for key in list(at):
@@ -603,7 +691,15 @@ class PfaffSystem(dgcv_class):
                     raise ValueError(
                         f"`at` gives {partner} = {at[partner]} where the conjugate of {key} = {at[key]} is {conj}"
                     )
-        return at
+        evaluated = {}
+        for key, (value, (label, args, derivs, _)) in partials.items():
+            if any(arg not in at for arg in args):
+                raise ValueError(
+                    f"a value for {partial_text(label, args, derivs)} is a value at a point: give "
+                    f"{listed_names(args)} in `at` as well"
+                )
+            evaluated[_subs(key, at)] = value
+        return _point_values(at, evaluated, {key: value for key, (value, _) in partials.items()})
 
     def Pfaff_distribution_codim(self, at=None):
         at = self._point(at)
@@ -626,10 +722,98 @@ class PfaffSystem(dgcv_class):
             out |= set(self._source.free_symbols)
         return out
 
+    def _engine_rules(self, rules):
+        if self._space is None:
+            return rules
+        known = self._space.jet_coordinate_rules
+        out = {}
+        for key, value in rules.items():
+            atom = key
+            if isinstance(key, zero_form_class) and isinstance(key.base, zero_form_atom):
+                atom = key.base
+            if isinstance(atom, zero_form_atom) and atom in known:
+                key = known[atom]
+            out[key] = _engine_value(value, known)
+        return out
+
+    def _occurrences(self):
+        exprs = []
+        if self._equation_source is not None:
+            exprs.extend(self._equation_source[0])
+        if self._source is None:
+            exprs.extend(entry for row in self._rows for entry in row)
+            if self._equation_source is None and self.horizontal_forms:
+                rows = self._coordinate_rows(self._in_source(self.horizontal_forms))
+                exprs.extend(entry for row in rows for entry in row)
+        out = []
+        for expr in exprs:
+            if not isinstance(expr, numbers.Number):
+                out.extend(function_occurrences(expr))
+        return out
+
+    def _function_rules(self, rules):
+        keyed = {key: function_parts(key) for key in rules}
+        if not any(parts is not None for parts in keyed.values()):
+            return rules, []
+        given = {
+            (parts[0], tuple(str(arg) for arg in parts[1]))
+            for parts in keyed.values()
+            if parts is not None and not any(parts[2])
+        }
+        out, images = dict(rules), []
+        for key, parts in keyed.items():
+            if parts is None:
+                continue
+            label, args, derivs, _ = parts
+            name = (label, tuple(str(arg) for arg in args))
+            if any(derivs):
+                if name not in given:
+                    raise ValueError(
+                        f"a rule on {partial_text(label, args, derivs)} alone does not substitute {label}: "
+                        f"give a rule for {label}, or the value at a point with `at`"
+                    )
+                continue
+            images.append(rules[key])
+            if not all(_is_symbol(arg) for arg in args):
+                continue
+            for occurrence, other, other_args, orders, _ in self._occurrences():
+                if any(orders) and (other, tuple(str(arg) for arg in other_args)) == name:
+                    out.setdefault(occurrence, _derivative(rules[key], args, orders))
+        return out, images
+
+    def _subs_equations(self, rules, parameters):
+        equations, restrict = self._equation_source
+        space = self._space
+        substituted = []
+        for F in equations:
+            try:
+                value = _subs(F, rules)
+            except (ZeroDivisionError, ValueError):
+                raise ValueError(f"the rules give a pole in a coefficient of {F}") from None
+            if _is_infinite(value):
+                raise ValueError(f"the rules give a pole in a coefficient of {F}")
+            substituted.append(value)
+        labels = self._labels if isinstance(self._labels, str) else "omega"
+        forms, chart, horizontal, defining, divisors, _, source = space._pfaff_inputs(
+            substituted, restrict, labels, self._filter_horizontals
+        )
+        system = PfaffSystem(
+            forms,
+            labels=labels,
+            parameters=parameters,
+            coordinates=chart,
+            filter_horizontals_for_indep_mod_Pfaff=self._filter_horizontals,
+            _objects=space._objects,
+        )
+        system._set_horizontal_forms(horizontal)
+        system._attach_equations(defining, divisors, space, source, record=False)
+        return system
+
     def subs(self, rules, with_diff_corollaries=False, with_conjugates=None):
         rules = _rule_dict(rules)
         if not rules:
             return self
+        rules, images = self._function_rules(self._engine_rules(rules))
         fixed = [key for key in rules if key in self.coordinates]
         if fixed:
             raise ValueError(
@@ -649,7 +833,11 @@ class PfaffSystem(dgcv_class):
             "with_diff_corollaries": with_diff_corollaries,
             "with_conjugates": with_conjugates,
         }
-        parameters = _substituted_parameters(self._parameters, rules, self.coordinates)
+        parameters = _substituted_parameters(self._parameters, rules, self.coordinates) | frozenset(
+            s for image in images for s in _free(image) if s not in self.coordinates
+        )
+        if self._equation_source is not None:
+            return self._subs_equations(rules, parameters)
         horizontal = self._in_source(self.horizontal_forms)
         if self._source is None:
             coframe = None
@@ -792,7 +980,7 @@ class PfaffSystem(dgcv_class):
         )
 
     def _structure_matrices(self, chart, at):
-        key = None if at is None else frozenset(at.items())
+        key = _point_key(at)
         if key not in self._matrices:
             f = len(chart.complementary_forms)
             is_zero = _zero_test()
@@ -815,7 +1003,7 @@ class PfaffSystem(dgcv_class):
     def _omega_check(self, values, chart, at):
         is_zero = _zero_test()
         for idx, form in zip(chart.Pfaffian_index, chart.Pfaffian_forms):
-            value = _subs(values(idx), at)
+            value = _at_point(values(idx), at)
             if not is_zero(value):
                 raise ValueError(
                     f"the vector is not annihilated by {form}: {form}(X) = {value}"
@@ -831,7 +1019,7 @@ class PfaffSystem(dgcv_class):
                 )
             values = data.coeff_dict
             self._omega_check(lambda idx: values.get(idx, 0), chart, at)
-            return [_subs(values.get(idx, 0), at) for idx in chart.complementary_index]
+            return [_at_point(values.get(idx, 0), at) for idx in chart.complementary_index]
         if isinstance(data, matrix_dgcv):
             if data.nrows > 1 and data.ncols > 1:
                 raise ValueError(
@@ -845,7 +1033,7 @@ class PfaffSystem(dgcv_class):
                     raise ValueError(
                         f"{form} is not a complementary form of the system: {forms}"
                     )
-                components[chart.complementary_position[form]] = _subs(value, at)
+                components[chart.complementary_position[form]] = _at_point(value, at)
             return components
         if query_dgcv_categories(data, {"vector_field"}):
             images = chart.coframe.forms_in_coordinates
@@ -857,7 +1045,7 @@ class PfaffSystem(dgcv_class):
                 lambda idx: _bridges._scalar(images[idx](data)), chart, at
             )
             return [
-                _subs(_bridges._scalar(images[idx](data)), at) for idx in chart.complementary_index
+                _at_point(_bridges._scalar(images[idx](data)), at) for idx in chart.complementary_index
             ]
         data = list(data)
         if len(data) != self.dimension:
@@ -865,7 +1053,7 @@ class PfaffSystem(dgcv_class):
                 f"a vector has {self.dimension} components in coframe order, received {len(data)}"
             )
         self._omega_check(lambda idx: data[idx], chart, at)
-        return [_subs(data[idx], at) for idx in chart.complementary_index]
+        return [_at_point(data[idx], at) for idx in chart.complementary_index]
 
     def vector(self, data, at=None):
         at = self._point(at)
@@ -975,7 +1163,7 @@ class PfaffSystem(dgcv_class):
 
     def _warm_caches(self, at=None):
         at = self._point(at)
-        key = None if at is None else frozenset(at.items())
+        key = _point_key(at)
         if key not in self._flags:
             chart = self._chart(at)
             data = self._chain(chart, at)
@@ -1137,7 +1325,7 @@ class PfaffSystem(dgcv_class):
         data = self._warm_caches(at)
         chart = data.chart
         n = len(forms)
-        rows = [[_subs(entry, at) for entry in row] for row in self._on_complementary(forms, chart)]
+        rows = [[_at_point(entry, at) for entry in row] for row in self._on_complementary(forms, chart)]
         if not chart.complementary_index or _rank(matrix_dgcv(rows)) < n:
             return "the horizontal forms are dependent on the distribution"
         if data.genre < n:
@@ -1221,6 +1409,25 @@ def _rule_dict(rules):
     ):
         return dict(rules)
     raise TypeError("`subs` takes a dict of rules or a list of (key, value) pairs")
+
+
+def _engine_value(value, known):
+    if engine_kind() == "builtin" or not isinstance(value, (zero_form_class, zero_form_atom)):
+        return value
+    found = set()
+    _atoms_in(value, found)
+    rules = {atom: known[atom] if atom in known else symbol(atom.label) for atom in found}
+    if isinstance(value, zero_form_atom):
+        return rules[value]
+    value = value.subs(rules)
+    return value.to_engine() if isinstance(value, zero_form_class) else value
+
+
+def _derivative(image, args, orders):
+    for arg, order in zip(args, orders):
+        for _ in range(order):
+            image = diff(image, arg)
+    return image
 
 
 def _substituted_parameters(parameters, rules, coordinates):

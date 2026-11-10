@@ -19,6 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import html
+import re
 import uuid
 
 from ..._aux._utilities._config import get_variable_registry, latex_in_html
@@ -26,6 +27,13 @@ from ..._aux._utilities._progress import _timed_progress_call
 from ..._aux._utilities._styles import get_style
 from ..._aux.printing._tables import build_plain_table, panel_view
 from ..._aux.printing.printing._dgcv_display import LaTeX, show
+from ..._aux.printing.printing._eds import conjugation_prefix, stem_derivative_tex
+from ..pde._functions import (
+    fixed_functions_line,
+    function_parts,
+    locus_text,
+    partial_text,
+)
 from ..pde._panels import (
     _corners,
     _header_block,
@@ -34,6 +42,7 @@ from ..pde._panels import (
     singularity_sources,
     summary_options,
 )
+from ._util import _point_key
 
 _title = "Integral flag of the Pfaff system"
 _container_id = "dgcv-integral-flag-summary"
@@ -102,31 +111,73 @@ _extra_css = """
 """
 
 
-def _math(value, use_latex):
-    return f"${LaTeX(value)}$" if use_latex else html.escape(str(value))
+def _form_tex(system):
+    sources = getattr(system, "_complementary_coordinates", None) or {}
+    parts = getattr(system, "_coordinate_parts", None) or {}
+    unknowns = getattr(system, "_jet_unknowns", None) or frozenset()
+    pairs = system._reality.pairs
+    prefix = conjugation_prefix()
+    out = {}
+    for form, x in sources.items():
+        partner = pairs.get(x)
+        conjugated = partner is not None and partner is not x and str(x).startswith(prefix)
+        source = partner if conjugated else x
+        if x in parts and source in parts:
+            stem, indices, _ = parts[source]
+            out[form] = stem_derivative_tex(stem, indices, conjugated, prefix="d")
+        elif x in unknowns:
+            tex = "d" + LaTeX(source)
+            out[form] = rf"\overline{{{tex}}}" if conjugated else tex
+    return out
 
 
-def _retex(system, tex):
-    table = getattr(system, "_coordinate_tex", None)
+def _retexer(system):
+    table = {
+        LaTeX(x): target
+        for x, target in (getattr(system, "_coordinate_tex", None) or {}).items()
+    }
+    table.update((LaTeX(form), target) for form, target in _form_tex(system).items())
+    table = {key: target for key, target in table.items() if key and key != target}
     if not table:
-        return tex
-    pairs = sorted(((LaTeX(x), target) for x, target in table.items()), key=lambda pair: -len(pair[0]))
-    for default, target in pairs:
-        if default and default != target:
-            tex = tex.replace(default, target)
-    return tex
+        return lambda tex: tex
+    pattern = re.compile("|".join(map(re.escape, sorted(table, key=len, reverse=True))))
+    return lambda tex: pattern.sub(lambda match: table[match.group(0)], tex)
 
 
-def _point(at, use_latex):
+def _renderers(system, use_latex, plain=False):
+    if plain or not use_latex:
+        text = str if plain else (lambda x: html.escape(str(x)))
+        return text, (lambda *sides: text(" = ".join(str(s) for s in sides))), str
+    retex = _retexer(system)
+
+    def tex(x):
+        return retex(LaTeX(x))
+
+    return (
+        lambda x: f"${tex(x)}$",
+        lambda *sides: "$" + " = ".join(tex(s) for s in sides) + "$",
+        tex,
+    )
+
+
+def _point_pairs(at):
+    pairs = [(key, value, key) for key, value in at.items()]
+    for key, value in getattr(at, "given", {}).items():
+        label, args, derivs, _ = function_parts(key)
+        pairs.append((key, value, partial_text(label, args, derivs)))
+    return pairs
+
+
+def _point(at, use_latex, tex=LaTeX):
     if not at:
         return ""
     if use_latex:
         return (
             " at $"
-            + ",\\ ".join(f"{LaTeX(k)} = {LaTeX(v)}" for k, v in at.items())
+            + ",\\ ".join(f"{tex(k)} = {tex(v)}" for k, v, _ in _point_pairs(at))
             + "$"
         )
-    return " at " + ", ".join(f"{k} = {v}" for k, v in at.items())
+    return " at " + ", ".join(f"{name} = {v}" for _, v, name in _point_pairs(at))
 
 
 def _levels(data):
@@ -177,15 +228,16 @@ def _panel_section(title, items, include_divider):
 
 
 def _rich(system, data, at, use_latex, theme_vars, extra_support):
+    math, _, tex = _renderers(system, use_latex)
     rows = []
     for p, vector, r, s in _levels(data):
-        rows.append([str(p), _math(vector, use_latex), str(r), str(s)])
+        rows.append([str(p), math(vector), str(r), str(s)])
     if not rows:
         rows.append(["--", "the distribution is zero, so there is no line", "--", "--"])
     columns = ["Level", "Spanning vector added", "Polar rank", "Character"]
     footer = [[{"html": _numbers(system, data, at), "attrs": {"colspan": 4}}]]
-    weights = ", ".join(_math(w, use_latex) for w in data.weights) or "none"
-    singular = [_math(d, use_latex) for d in data.singularities] or ["none"]
+    weights = ", ".join(math(w) for w in data.weights) or "none"
+    singular = [math(d) for d in data.singularities] or ["none"]
     content = _panel_section("Weights", [weights], False) + _panel_section(
         "Singularities", singular, True
     )
@@ -194,7 +246,7 @@ def _rich(system, data, at, use_latex, theme_vars, extra_support):
     table = build_plain_table(
         columns=columns,
         rows=rows,
-        caption=_title + _point(at, use_latex),
+        caption=_title + _point(at, use_latex, tex),
         theme_css_vars=theme_vars,
         extra_css=_extra_css,
         table_attrs='style="table-layout:auto;"',
@@ -264,8 +316,7 @@ def _yes_no(value):
 
 
 def _warm_summary(system, at, threshold, on_update):
-    key = None if at is None else frozenset(at.items())
-    cache = system._summary_cache.setdefault(key, {})
+    cache = system._summary_cache.setdefault(_point_key(at), {})
     steps = (
         (
             "chain",
@@ -337,7 +388,7 @@ def _random_regularity(system):
     return point, True, None
 
 
-def _singularity_lines(system, math):
+def _singularity_lines(system, equation):
     lines = []
     loci_by_source = system.singularities()
     for key, label in singularity_sources:
@@ -346,28 +397,34 @@ def _singularity_lines(system, math):
             lines.append(
                 f"from {label}: "
                 + "; ".join(
-                    " = ".join(math(c) for c in locus) + " = 0" for locus in loci
+                    locus_text(locus, system._independent_variables, equation)
+                    for locus in loci
                 )
             )
     return lines
 
 
-def _sections(system, cache, at, math):
+def _sections(system, cache, at, math, equation, use_latex=False, text=str):
     data = cache.get("chain")
     source = system._source
     first = [f"manifold dimension: {system.dimension}"]
     if system.defining_equations:
         first.append(
             "defining equations: "
-            + ", ".join(f"{math(F)} = 0" for F in system.defining_equations)
+            + ", ".join(equation(F, 0) for F in system.defining_equations)
         )
     if source is None:
         first.append("coordinates: " + ", ".join(math(x) for x in system.coordinates))
+        if system.fixed_functions:
+            first.append(fixed_functions_line(system.fixed_functions, use_latex, text))
     else:
         first.append(f"coframe: {_coframe_name(source, math)}")
     if at:
         first.append(
-            "point: " + ", ".join(f"{math(k)} = {math(v)}" for k, v in at.items())
+            "point: "
+            + ", ".join(
+                equation(k if use_latex else name, v) for k, v, name in _point_pairs(at)
+            )
         )
     first.append(f"independent Pfaff system forms: {system.Pfaff_distribution_codim()}")
     dr = system.Pfaff_distribution_rank(at)
@@ -491,7 +548,8 @@ def _generality_html(lead, items, corollary):
 
 
 def _system_plain(system, cache, at):
-    first, second, third = _sections(system, cache, at, str)
+    math, equation, _ = _renderers(system, False, plain=True)
+    first, second, third = _sections(system, cache, at, math, equation)
     titles = ("Pfaff system", "Invariants", "Integral submanifold space")
     width = max(len(f" {t} ") for t in titles)
     lines = [_header_block(titles[0], width), "• " + _equations(system, False)]
@@ -501,7 +559,7 @@ def _system_plain(system, cache, at):
     lines += ["", _header_block(titles[1], width)]
     lines += [f"• {item}" for item in second]
     lines += ["", f"• {_flag_note}", f"• {_terminology_note}"]
-    singular = _singularity_lines(system, str)
+    singular = _singularity_lines(system, equation)
     if singular:
         lines += ["", _header_block("Singularities", width)]
         lines += [f"• {item}" for item in singular]
@@ -519,7 +577,7 @@ def _system_plain(system, cache, at):
 _structure_equation_limit = 15
 
 
-def _structure_lines(system, use_latex):
+def _structure_lines(system, use_latex, tex=LaTeX):
     equations = system.coframe.structure_equations
     forms = list(system.Pfaffian_forms)
     shown = forms[:_structure_equation_limit]
@@ -527,7 +585,7 @@ def _structure_lines(system, use_latex):
     for form in shown:
         if use_latex:
             lines.append(
-                rf"$\operatorname{{d}}{LaTeX(form)} = {_retex(system, LaTeX(equations[form]))}$"
+                rf"$\operatorname{{d}}{LaTeX(form)} = {tex(equations[form])}$"
             )
         else:
             lines.append(f"d {form} = {equations[form]}")
@@ -556,14 +614,16 @@ def _system_rich(system, cache, at, use_latex, style_key, extra_support):
         "plaque_border": "--plaque-border" in theme_data.custom_css_vars,
         "plaque_content": True,
     }
-    math = (lambda x: f"${_retex(system, LaTeX(x))}$") if use_latex else (lambda x: html.escape(str(x)))
-    first, second, third = _sections(system, cache, at, math)
+    math, equation, tex = _renderers(system, use_latex)
+    first, second, third = _sections(
+        system, cache, at, math, equation, use_latex, html.escape
+    )
     equations = (
         _equations(system, use_latex)
         if use_latex
         else html.escape(_equations(system, False))
     )
-    structure = _structure_lines(system, use_latex)
+    structure = _structure_lines(system, use_latex, tex)
     if not use_latex:
         structure = [html.escape(line) for line in structure]
     specs = [
@@ -578,7 +638,7 @@ def _system_rich(system, cache, at, use_latex, style_key, extra_support):
             "footer": _HTMLWrapper(f"{_flag_note}<br>{_terminology_note}"),
         },
     ]
-    singular = _singularity_lines(system, math)
+    singular = _singularity_lines(system, equation)
     if singular:
         specs.append({"header": "Singularities", "itemized_text": singular})
     wrapped = ()
@@ -639,9 +699,7 @@ def system_summary(
             "\nInterrupted. Rendering the summary from the results computed so far; "
             "they are kept, so re-running summary resumes from here."
         )
-        cache = system._summary_cache.get(
-            None if at is None else frozenset(at.items()), {}
-        )
+        cache = system._summary_cache.get(_point_key(at), {})
     if plain_text:
         out = _system_plain(system, cache, at)
     else:

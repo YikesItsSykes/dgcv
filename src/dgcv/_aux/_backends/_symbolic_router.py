@@ -374,6 +374,77 @@ def subs(expr, subs_data, **kwargs):
         return f(subs_data)
 
 
+def _occurrence_order(entry):
+    return (entry[1], sum(entry[3]), entry[3], str(entry[2]))
+
+
+def _sympy_function_occurrences(expr):
+    atoms = getattr(expr, "atoms", None)
+    if atoms is None:
+        return []
+    out = []
+    for head in atoms(engine_module().Function):
+        label = getattr(head.func, "_dgcv_label", None)
+        if label is None:
+            continue
+        derivs = head.func._dgcv_derivs or (0,) * len(head.args)
+        root = head.func._dgcv_root or head.func
+        out.append((head, label, tuple(head.args), tuple(derivs), root(*head.args)))
+    return sorted(out, key=_occurrence_order)
+
+
+def _sage_function_occurrences(expr):
+    if not hasattr(expr, "operator"):
+        return []
+    from sage.symbolic.operators import FDerivativeOperator  # type: ignore
+
+    found = {}
+
+    def walk(e):
+        op = e.operator()
+        if op is None:
+            return
+        args = e.operands()
+        derivs = None
+        if isinstance(op, FDerivativeOperator):
+            head = op.function()
+            derivs = [0] * len(args)
+            for k in op.parameter_set():
+                derivs[int(k)] += 1
+        elif getattr(op, "_dgcv_category", None) == "function":
+            head = op
+            derivs = [0] * len(args)
+        if derivs is not None and getattr(head, "_dgcv_category", None) == "function":
+            found.setdefault(e, (e, str(head), tuple(args), tuple(derivs), head(*args)))
+        for arg in args:
+            walk(arg)
+
+    walk(expr)
+    return sorted(found.values(), key=_occurrence_order)
+
+
+def function_occurrences(expr):
+    expr = to_active_engine(expr)
+    if isinstance(expr, numbers.Number):
+        return []
+    capability = engine_capability("function_occurrences")
+    if capability is not None:
+        return capability(expr)
+    leaves = getattr(expr, "tree_leaves", None)
+    if leaves is not None:
+        found = {}
+        for leaf in leaves:
+            for entry in function_occurrences(leaf):
+                found.setdefault(entry[0], entry)
+        return sorted(found.values(), key=_occurrence_order)
+    kind = engine_kind()
+    if kind == "sympy":
+        return _sympy_function_occurrences(expr)
+    if kind == "sage":
+        return _sage_function_occurrences(expr)
+    return []
+
+
 def _conjugation_swaps(expr):
     cd = get_variable_registry()["conversion_dictionaries"]["conjugation"]
     swaps = {}

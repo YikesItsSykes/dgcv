@@ -19,12 +19,12 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import numbers
-import re
 from dataclasses import dataclass
 from itertools import combinations_with_replacement
 
 from ..._aux._backends._calculus import diff
 from ..._aux._backends._display import latex as _routed_latex
+from ..._aux._backends._engine import engine_kind
 from ..._aux._backends._types_and_constants import imag_unit, rational, symbol
 from ..._aux._utilities._config import (
     dgcv_warning,
@@ -39,7 +39,11 @@ from ..._aux._vmf._safeguards import (
     validate_label,
 )
 from ..._aux._vmf.vmf import clearVar, vmf_lookup
-from ..._aux.printing.printing._eds import conjugation_prefix
+from ..._aux.printing.printing._eds import (
+    conjugation_prefix,
+    label_derivative_parts,
+    stem_derivative_tex,
+)
 from ...core.base import dgcv_class
 from ...core.dgcv_core.atom_factory.creator import createVariables
 from .. import _bridges
@@ -151,24 +155,19 @@ def _real_name(name, stem, real_stem):
     return real_stem + name[len(stem):]
 
 
-def _subscripted(tex, indices):
-    match = re.fullmatch(r"(.*)_\{([^{}]*)\}", tex)
-    if match:
-        return f"{match.group(1)}_{{{match.group(2)},{indices}}}"
-    return f"{tex}_{{{indices}}}"
+def _jet_stem(space, i):
+    first = space.p.get((i, (1,)))
+    label = None if first is None else str(first)
+    if label is None or not label.endswith("_1"):
+        return None
+    return label_derivative_parts(label[:-2])
 
 
-def _jet_base(tex):
-    match = re.fullmatch(r"(.*)_\{(?:([^{}]*),)?1\}", tex)
-    if match is None:
-        return tex
-    return match.group(1) + (f"_{{{match.group(2)}}}" if match.group(2) else "")
-
-
-def _coordinate_tex(space):
+def _coordinate_parts(space):
     conjugates = space._conjugates or {}
-    if not any(partner is not None and partner is not key for key, partner in conjugates.items()):
-        return {}
+    paired = any(partner is not None and partner is not key for key, partner in conjugates.items())
+    if not paired and engine_kind() == "builtin":
+        return {}, {}
     prefix = conjugation_prefix()
 
     def primary(symbol):
@@ -176,7 +175,7 @@ def _coordinate_tex(space):
         return partner is None or partner is symbol or not str(symbol).startswith(prefix)
 
     position = {x: j + 1 for j, x in enumerate(space.x)}
-    index_tex, out, base = {}, {}, {}
+    index_tex, out = {}, {}
     for x in space.x:
         if primary(x):
             index_tex[x] = str(position[x])
@@ -184,17 +183,25 @@ def _coordinate_tex(space):
             index_tex[x] = r"\overline{" + str(position[conjugates[x]]) + "}"
             out[x] = r"\overline{" + _routed_latex(conjugates[x]) + "}"
     slot = {u: i for i, u in enumerate(space.u, 1)}
+    stems = {}
     for u in space.u:
         if primary(u):
-            base[u] = _jet_base(_routed_latex(space.p[(slot[u], (1,))]))
+            stems[u] = (_jet_stem(space, slot[u]), False)
         else:
-            partner = conjugates[u]
-            base[u] = r"\overline{" + _jet_base(_routed_latex(space.p[(slot[partner], (1,))])) + "}"
-            out[u] = r"\overline{" + _routed_latex(partner) + "}"
+            stems[u] = (_jet_stem(space, slot[conjugates[u]]), True)
+            out[u] = r"\overline{" + _routed_latex(conjugates[u]) + "}"
+    parts = {}
     for (i, sigma), coordinate in space.p.items():
-        if sigma:
-            indices = ",".join(index_tex[space.x[j - 1]] for j in sigma)
-            out[coordinate] = _subscripted(base[space.u[i - 1]], indices)
+        stem, conjugated = stems[space.u[i - 1]]
+        if sigma and stem is not None:
+            parts[coordinate] = (stem, tuple(index_tex[space.x[j - 1]] for j in sigma), conjugated)
+    return parts, out
+
+
+def _coordinate_tex(parts, out):
+    out = dict(out)
+    for coordinate, (stem, indices, conjugated) in parts.items():
+        out[coordinate] = stem_derivative_tex(stem, indices, conjugated)
     return {coordinate: tex for coordinate, tex in out.items() if tex != _routed_latex(coordinate)}
 
 
@@ -290,7 +297,8 @@ class jetSpace(dgcv_class):
             for sigma in self.multi_indices[length]
         )
         self.dim = len(self.coordinates)
-        self.coordinate_tex = _coordinate_tex(self)
+        self._coordinate_parts = _coordinate_parts(self)
+        self.coordinate_tex = _coordinate_tex(*self._coordinate_parts)
         self.conversion = {}
         self._complex_source = None
         self._systems = ()
@@ -410,6 +418,7 @@ class jetSpace(dgcv_class):
             _objects=self._objects,
         )
         system.defining_equations = tuple(equations)
+        system._independent_variables = tuple(self.x)
         return system
 
     @staticmethod
@@ -426,7 +435,7 @@ class jetSpace(dgcv_class):
             self._reality,
         )
         if restrict or not equations:
-            return (*self._restricted_inputs(equations), None)
+            return (*self._restricted_inputs(equations), None, (tuple(equations), True))
         forms = list(self.contact_forms) + [self._differential(F) for F in equations]
         system = self._full_space_system(forms, equations, labels, filter_horizontals)
         if restrict is None and not self._regular_on_a_sample(system):
@@ -435,8 +444,16 @@ class jetSpace(dgcv_class):
                 "is a combination of the others' there, as after a prolongation), so the system restricted to "
                 "the PDE is used; pass restrict=True to choose it silently or restrict=False to keep the whole space"
             )
-            return (*self._restricted_inputs(equations), None)
-        return forms, list(self.coordinates), list(self.dx), tuple(equations), [], system
+            return (*self._restricted_inputs(equations), None, (tuple(equations), True))
+        return (
+            forms,
+            list(self.coordinates),
+            list(self.dx),
+            tuple(equations),
+            [],
+            system,
+            (tuple(equations), restrict),
+        )
 
     def restrict(self, equations=None):
         if equations is None:
@@ -454,7 +471,7 @@ class jetSpace(dgcv_class):
     def pfaff_system(
         self, equations=None, *, restrict=None, labels="omega", filter_horizontals_for_indep_mod_Pfaff=True
     ):
-        forms, chart, horizontal, defining, divisors, system = self._pfaff_inputs(
+        forms, chart, horizontal, defining, divisors, system, source = self._pfaff_inputs(
             equations, restrict, labels, filter_horizontals_for_indep_mod_Pfaff
         )
         if system is None:
@@ -467,7 +484,7 @@ class jetSpace(dgcv_class):
                 _objects=self._objects,
             )
         system._set_horizontal_forms(horizontal)
-        system._attach_equations(defining, divisors, self)
+        system._attach_equations(defining, divisors, self, source)
         return system
 
     def __dgcv_converter__(

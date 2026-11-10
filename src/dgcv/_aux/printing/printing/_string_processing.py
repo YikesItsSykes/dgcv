@@ -164,6 +164,13 @@ def label_indices(label, decorations_support=True):
     )
 
 
+def _digit_suffix(base):
+    if "_" in base or not base or not base[-1].isdigit():
+        return None
+    m = re.match(r"^(.+?)(\d+)$", base)
+    return (m.group(1), m.group(2)) if m else None
+
+
 def _format_label_with_hi_low(
     label: str,
     infer_suffix: bool = False,
@@ -172,7 +179,45 @@ def _format_label_with_hi_low(
 ) -> str:
     if not label:
         return label
+    is_conjugate, decorations, base_part, superscript_tex, subscripts = _label_components(
+        label, infer_suffix, prime_processing, decorations_support
+    )
+    split = _digit_suffix(base_part) if subscripts and not decorations else None
+    if split:
+        name, digits = split
+        out = latexify_base(name)
+        if superscript_tex:
+            out += f"^{{{superscript_tex}}}"
+        out += f"_{{{digits};{','.join(subscripts)}}}"
+    else:
+        out = latexify_base(base_part)
+        for decoration_cmd in reversed(decorations):
+            out = f"{decoration_cmd}{{{out}}}"
+        if superscript_tex:
+            out += f"^{{{superscript_tex}}}"
+        if subscripts:
+            out += f"_{{{','.join(subscripts)}}}"
+    if is_conjugate:
+        out = rf"\overline{{{out}}}"
+    return out
 
+
+def label_tex_parts(label, decorations_support=True):
+    _, decorations, base_part, superscript_tex, subscripts = _label_components(
+        label, False, True, decorations_support
+    )
+    digits = ""
+    if not decorations:
+        split = _digit_suffix(base_part)
+        if split:
+            base_part, digits = split
+    head = latexify_base(base_part)
+    for decoration_cmd in reversed(decorations):
+        head = f"{decoration_cmd}{{{head}}}"
+    return head, superscript_tex, digits, subscripts
+
+
+def _label_components(label, infer_suffix, prime_processing, decorations_support):
     text = str(label)
 
     text, is_conjugate = _strip_conjugation_prefix(text)
@@ -224,22 +269,7 @@ def _format_label_with_hi_low(
             base_part = m.group(1)
             subscripts = [m.group(2)]
 
-    base_tex = latexify_base(base_part)
-    for decoration_cmd in reversed(decorations):
-        base_tex = f"{decoration_cmd}{{{base_tex}}}"
-
-    superscript_tex = format_superscripts(superscripts)
-
-    out = base_tex
-    if superscript_tex:
-        out += f"^{{{superscript_tex}}}"
-    if subscripts:
-        out += f"_{{{','.join(subscripts)}}}"
-
-    if is_conjugate:
-        out = rf"\overline{{{out}}}"
-
-    return out
+    return is_conjugate, decorations, base_part, format_superscripts(superscripts), subscripts
 
 
 def latexify_base(base: str) -> str:

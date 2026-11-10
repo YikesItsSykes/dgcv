@@ -22,7 +22,7 @@ import numbers
 import random
 from dataclasses import dataclass
 
-from ..._aux._backends._engine import engine_capability
+from ..._aux._backends._engine import engine_capability, engine_kind
 from ..._aux._backends._symbolic_router import _scalar_is_zero
 from ..._aux._backends._types_and_constants import _disposable_symbols
 from ..._aux._vmf._safeguards import create_key
@@ -31,6 +31,7 @@ from ...core.arrays._matrix_linalg import _eliminate
 from ...core.solvers import solve_dgcv
 from ._util import (
     _add,
+    _cancel_generators,
     _chain_simplifier,
     _dot,
     _free,
@@ -47,6 +48,9 @@ _exact_chain_work_limit = 100000
 
 
 _cas_characters_per_term = 12
+
+
+_cas_cancel_generator_limit = 15
 
 
 _sample_bound = 9
@@ -84,6 +88,16 @@ def _exact_polar_level(polar, limit):
                 raise _ExactChainTooLarge
         return inner(value)
 
+    simplifier = _chain_simplifier()
+    if limit is not None and engine_kind() == "sympy":
+        cancel = simplifier
+
+        def simplifier(value):
+            count = _cancel_generators(value)
+            if count is not None and count >= _cas_cancel_generator_limit:
+                raise _ExactChainTooLarge
+            return cancel(value)
+
     rank, pivot_rows, _, divisors = _eliminate(
         rows,
         rhs_cols=1,
@@ -91,7 +105,7 @@ def _exact_polar_level(polar, limit):
         simplify_steps=True,
         want_pivmap=True,
         zero_test=test,
-        simplifier=_chain_simplifier(),
+        simplifier=simplifier,
     )
     return rank, [d for d in divisors if not isinstance(d, numbers.Number)], rows, pivot_rows
 

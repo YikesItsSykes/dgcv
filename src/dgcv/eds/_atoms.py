@@ -24,9 +24,18 @@ from fractions import Fraction
 from functools import total_ordering
 
 from ..core.base import dgcv_class
-from .._aux._utilities._config import dgcv_warning, get_variable_registry
+from .._aux._utilities._config import (
+    dgcv_warning,
+    get_dgcv_settings_registry,
+    get_variable_registry,
+)
 from .._aux._vmf._safeguards import retrieve_passkey
-from .._aux.printing.printing._eds import conjugation_prefix, ordinal_latex
+from .._aux.printing.printing._eds import (
+    conjugation_prefix,
+    derivative_index_tex,
+    label_derivative_parts,
+    ordinal_latex,
+)
 from .._aux.printing.printing._string_processing import _process_var_label
 from .._aux._backends._calculus import diff as _routed_diff
 from .._aux._backends._cls_coercion import register_legacy_sympy_class
@@ -1285,6 +1294,32 @@ class zero_form_atom(dgcv_class):
         # Convert string indices to LaTeX-compatible integers
         lower_list = [cIdx(idx, self.coframe) for idx in lower_list if idx]
         upper_list = [cIdx(idx, self.coframe) for idx in upper_list if idx]
+
+        if (
+            partials
+            and len(self.coframe_derivatives) == 1
+            and "verbose" not in self._markers
+            and get_dgcv_settings_registry().get("_semicolon_derivative_indices", True)
+        ):
+            derivatives = [
+                cIdx(j + 1, self.coframe) for j in self.coframe_derivatives[0][1:]
+            ]
+            if index_part:
+                head = _process_var_label(first_part)
+                if lower_list and "_" not in head and "^" not in head:
+                    return derivative_index_tex(
+                        head,
+                        ",".join(lower_list),
+                        derivatives,
+                        conjugated=conjugated,
+                        sup=",".join(upper_list),
+                    )
+            else:
+                head, sup, own, sep = label_derivative_parts(first_part)
+                if own:
+                    return derivative_index_tex(
+                        head, own, derivatives, conjugated=conjugated, sep=sep, sup=sup
+                    )
 
         # Extract partial derivative indices
         partials_strs = []

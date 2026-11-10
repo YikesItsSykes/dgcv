@@ -1,8 +1,41 @@
 import numbers
 import re
 
-from ._string_processing import _format_label_with_hi_low
+from ._string_processing import _format_label_with_hi_low, label_tex_parts
 from ..._utilities._config import get_dgcv_settings_registry
+
+
+def derivative_index_tex(head, own, derivatives, *, conjugated=False, sep=";", sup=""):
+    tail = ",".join(derivatives)
+    top = f"^{{{sup}}}" if sup else ""
+    if not own:
+        body = rf"\overline{{{head}{top}}}" if conjugated else f"{head}{top}"
+        return f"{body}_{{{tail}}}" if tail else body
+    if not tail:
+        body = f"{head}{top}_{{{own}}}"
+        return rf"\overline{{{body}}}" if conjugated else body
+    if not conjugated:
+        return f"{head}{top}_{{{own}{sep}{tail}}}"
+    outer_top = f"^{{\\vphantom{{{sup}}}}}" if sup else ""
+    return (
+        rf"\overline{{{head}{top}_{{{own}\vphantom{{{sep}{tail}}}}}}}"
+        rf"{{}}{outer_top}_{{\vphantom{{{own}}}{sep}{tail}}}"
+    )
+
+
+def stem_derivative_tex(stem, derivatives, conjugated=False, prefix=""):
+    head, sup, own, sep = stem
+    return derivative_index_tex(
+        prefix + head, own, derivatives, conjugated=conjugated, sep=sep, sup=sup
+    )
+
+
+def label_derivative_parts(label):
+    head, sup, digits, subscripts = label_tex_parts(label)
+    if digits:
+        own = digits + (";" + ",".join(subscripts) if subscripts else "")
+        return head, sup, own, "," if subscripts else ";"
+    return head, sup, ",".join(subscripts), ","
 
 
 def conjugation_prefix():
@@ -38,6 +71,9 @@ def bar_label_latex(label):
     tex = _format_label_with_hi_low(base)
     if not conjugated:
         return tex
+    head, sup, digits, subscripts = label_tex_parts(base)
+    if digits and subscripts:
+        return derivative_index_tex(head, digits, subscripts, conjugated=True, sup=sup)
     cuts = [i for i in (tex.find("^"), tex.find("_")) if i != -1]
     if cuts:
         idx = min(cuts)
